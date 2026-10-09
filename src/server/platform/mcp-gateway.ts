@@ -18,7 +18,8 @@ import type {Express} from 'express';
 import {dirname} from 'path';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
+import {Server} from '@modelcontextprotocol/sdk/server/index.js';
+import {CallToolRequestSchema, ListToolsRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {MCPRegistryService} from '../services/mcp-registry-service.js';
 import type {MCPServerConfig} from '../services/mcp-config-service.js';
@@ -50,6 +51,13 @@ const PER_SERVER_SOFT_TIMEOUT_MS = 8_000;
 const PLATFORM_CATALOG_TTL_MS = 30_000;
 /** 降级目录（上游软超时）的短冷却：过期后下次调用重试上游枚举 */
 const DEGRADED_CATALOG_TTL_MS = 2_000;
+/**
+ * 显式等待上游就绪的超时（毫秒）：需求拉取等「用户主动等待」场景用。
+ * 与目录构建的软超时（8s）语义相反——用户点击后的等待值得长等：
+ * Windows 下 npx 冷启动实测 3~15s+（npm registry 解析/解压），8s 软超时
+ * 会静默跳过慢启动的上游，agent 拿到空目录只能瞎猜。
+ */
+const UPSTREAM_EXPLICIT_WAIT_TIMEOUT_MS = 90_000;
 
 /** 单个上游的运行时连接状态 */
 interface UpstreamConnection {
@@ -329,13 +337,20 @@ export class McpGateway {
     }
 
     /**
-     * 构造聚合 McpServer 实例（注册平台原生工具 + 上游转发工具）
+     * 构造聚合 Server 实例（平台原生工具 + 上游转发工具）
      * @param allowed - 可选的 server 名白名单（url query 传入）
      * @description Streamable HTTP 无状态模式：每个 HTTP 请求新建实例，
      * 注册是纯内存轻量操作。上游连接是网关级共享的（不随请求销毁）。
+     *
+     * ⚠️ 必须用低层 Server + 显式 handler，不能用高层 McpServer.registerTool：
+     * registerTool 的 inputSchema 只接受 Zod schema / ZodRawShape，而网关手里的
+     * 是上游原始 JSON Schema——注册即抛「inputSchema must be a Zod schema or raw
+     * shape」，首个 initialize 请求直接 500，Claude CLI 视 adw-platform 为坏
+     * server，模型一个平台工具都看不到（2026-10-08 需求拉取失败的根因）。
+     * 协议线格式的 inputSchema 本就是 JSON Schema，低层 handler 原样透传即可。
      */
-    private async createAggregateServer(allowed?: string[]): Promise<McpServer> {
-        const server = new McpServer(
+    private async createAggregateServer(allowed?: string[]): Promise<Server> {
+        const server = new Server(
             {name: PLATFORM_MCP_SERVER_NAME, version: '1.0.0'},
             {capabilities: {tools: {listChanged: false}}},
         );
@@ -345,26 +360,37 @@ export class McpGateway {
             ...getPlatformToolRegistry().list(),
         ];
 
-        for (const tool of allTools) {
-            // registerTool 的泛型对 Zod schema 推断严格（JSON Schema 直传时回调参数被
-            // 推成 never），此处以显式签名的注册器收窄，schema 原样透传给客户端
-            const register = server.registerTool.bind(server) as (
-                name: string,
-                config: {title?: string; description?: string; inputSchema?: unknown},
-                cb: (args: Record<string, unknown>) => Promise<{content: Array<{type: 'text'; text: string}>; isError: boolean}>,
-            ) => void;
-            register(
-                tool.name,
-                {title: tool.label, description: tool.description, inputSchema: tool.inputSchema},
-                async (args) => {
-                    const result = await tool.execute(args ?? {}, {source: 'claude'});
-                    return {
-                        content: [{type: 'text' as const, text: result.text}],
-                        isError: result.isError === true,
-                    };
-                },
-            );
-        }
+        server.setRequestHandler(ListToolsRequestSchema, async () => ({
+            tools: allTools.map((tool) => ({
+                name: tool.name,
+                title: tool.label,
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+            })),
+        }));
+        server.setRequestHandler(CallToolRequestSchema, async (request) => {
+            const tool = allTools.find((t) => t.name === request.params.name);
+            if (!tool) {
+                return {
+                    content: [{type: 'text' as const, text: `未找到工具: ${request.params.name}`}],
+                    isError: true,
+                };
+            }
+            try {
+                const result = await tool.execute(request.params.arguments ?? {}, {source: 'claude'});
+                return {
+                    content: [{type: 'text' as const, text: result.text}],
+                    isError: result.isError === true,
+                };
+            } catch (err) {
+                // 执行异常包装为 isError 结果回喂模型（连接类错误已由 callUpstream 重连兜底）
+                const message = err instanceof Error ? err.message : String(err);
+                return {
+                    content: [{type: 'text' as const, text: `工具执行失败: ${message}`}],
+                    isError: true,
+                };
+            }
+        });
         return server;
     }
 
@@ -420,6 +446,32 @@ export class McpGateway {
      */
     warmUp(): Promise<void> {
         return this.listUpstreamTools().then(() => undefined);
+    }
+
+    // === 显式就绪等待（需求拉取等用户主动等待场景） ===
+
+    /**
+     * 显式等待指定上游就绪：与 listUpstreamTools 的软超时（8s 跳过）语义相反，
+     * 这里允许长等（默认 90s）并忽略熔断冷却（用户点击 = 明确重试意图）。
+     * 供需求 agent 拉取在启动引擎前调用——上游没就绪就开跑，agent 只会
+     * 拿到空工具目录然后瞎猜；逐 server 返回结论，调用方可精确报错/展示进度。
+     * @param names 上游 server 名清单（白名单语义，与 registry 名一致）
+     */
+    async ensureUpstreamsReady(names: string[], timeoutMs: number = UPSTREAM_EXPLICIT_WAIT_TIMEOUT_MS): Promise<Array<{name: string; ok: boolean; toolCount?: number; reason?: string}>> {
+        return Promise.all(names.map(async (name) => {
+            // 显式等待：清除熔断冷却，让 ensureUpstream 真正重试连接
+            this.failedUntil.delete(name);
+            try {
+                const conn = await withTimeout(
+                    this.ensureUpstream(name),
+                    timeoutMs,
+                    `MCP server "${name}" 连接超时（${Math.round(timeoutMs / 1000)}s 内未完成握手）`,
+                );
+                return {name, ok: true, toolCount: conn.tools.length};
+            } catch (err) {
+                return {name, ok: false, reason: err instanceof Error ? err.message : String(err)};
+            }
+        }));
     }
 
     // === 引擎子进程消费入口（平台 REST 面） ===
@@ -590,9 +642,28 @@ export function normalizeWindowsCommand(
     return {command: 'cmd', args: ['/c', command, ...args]};
 }
 
-/** 上游子进程的默认环境（继承 PATH 等，保证 npx/node 可寻址） */
+/**
+ * 上游子进程的环境变量（白名单透传）。
+ * 此前只透传 PATH 的极简 env 会让 npm/npx 找不到缓存与临时目录
+ * （APPDATA/LOCALAPPDATA/TEMP 缺失）：实测 npx 冷启动从 ~3.5s 劣化到 ~10s，
+ * 超出目录软超时 → 上游被静默跳过 → agent 拿到空工具目录。
+ * 这里透传 Windows 程序正常工作所需的系统变量 + npm 配置（registry 镜像等），
+ * 不透传业务密钥类变量（鉴权仍由注册中心 per-server env 提供）。
+ */
 function pickDefaultEnv(): Record<string, string> {
-    return {PATH: process.env.PATH ?? ''};
+    const passthrough = [
+        'PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC', 'OS',
+        'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA',
+        'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'TEMP', 'TMP',
+        'USERNAME', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE',
+        'NPM_CONFIG_REGISTRY', 'NPM_CONFIG_CACHE', 'NODE_OPTIONS',
+    ];
+    const out: Record<string, string> = {};
+    for (const key of passthrough) {
+        const value = process.env[key];
+        if (value !== undefined) out[key] = value;
+    }
+    return out;
 }
 
 // === 单例 ===

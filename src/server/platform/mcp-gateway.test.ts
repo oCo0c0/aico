@@ -6,6 +6,8 @@
 import {describe, it, expect, afterEach, vi} from 'vitest';
 import express from 'express';
 import type {Server} from 'http';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {McpGateway, PLATFORM_MCP_SERVER_NAME, normalizeWindowsCommand} from './mcp-gateway.js';
 import {getPlatformToolRegistry} from './tool-registry.js';
 import type {PlatformToolDefinition} from './types.js';
@@ -78,6 +80,53 @@ describe('McpGateway', () => {
         gateway.setPlatformEndpoint('http://127.0.0.1:3000/api/platform', 'secret');
         expect(gateway.getPlatformEndpoint()).toEqual({url: 'http://127.0.0.1:3000/api/platform', apiKey: 'secret'});
     });
+
+    // === ensureUpstreamsReady（显式就绪等待，需求拉取用） ===
+
+    it('就绪的上游返回 ok + 工具数', async () => {
+        const gateway = new McpGateway(emptyRegistry());
+        vi.spyOn(gateway as never as {ensureUpstream(name: string): Promise<unknown>}, 'ensureUpstream')
+            .mockResolvedValue({tools: [{name: 'a'}, {name: 'b'}]});
+
+        const result = await gateway.ensureUpstreamsReady(['ones-api']);
+        expect(result).toEqual([{name: 'ones-api', ok: true, toolCount: 2}]);
+        vi.restoreAllMocks();
+    });
+
+    it('连接失败 → 逐项 ok:false + 可读原因（不抛出）', async () => {
+        const gateway = new McpGateway(emptyRegistry());
+        vi.spyOn(gateway as never as {ensureUpstream(name: string): Promise<unknown>}, 'ensureUpstream')
+            .mockRejectedValue(new Error('spawn ENOENT'));
+
+        const result = await gateway.ensureUpstreamsReady(['ones-api']);
+        expect(result).toEqual([{name: 'ones-api', ok: false, reason: 'spawn ENOENT'}]);
+        vi.restoreAllMocks();
+    });
+
+    it('忽略熔断冷却：清除 failedUntil 后真正重试连接', async () => {
+        const gateway = new McpGateway(emptyRegistry());
+        const internal = gateway as never as {failedUntil: Map<string, number>};
+        internal.failedUntil.set('ones-api', Date.now() + 60_000); // 模拟熔断中
+        const ensureSpy = vi.spyOn(gateway as never as {ensureUpstream(name: string): Promise<unknown>}, 'ensureUpstream')
+            .mockResolvedValue({tools: [{name: 't'}]});
+
+        const result = await gateway.ensureUpstreamsReady(['ones-api']);
+        expect(result[0].ok).toBe(true); // 冷却被绕过，连接真正重试
+        expect(ensureSpy).toHaveBeenCalledWith('ones-api');
+        expect(internal.failedUntil.has('ones-api')).toBe(false); // 冷却已清除
+        vi.restoreAllMocks();
+    });
+
+    it('超时上限生效：永不就绪的上游在 timeoutMs 后返回超时原因', async () => {
+        const gateway = new McpGateway(emptyRegistry());
+        vi.spyOn(gateway as never as {ensureUpstream(name: string): Promise<unknown>}, 'ensureUpstream')
+            .mockImplementation(() => new Promise(() => undefined)); // 永不 resolve
+
+        const result = await gateway.ensureUpstreamsReady(['slow'], 50);
+        expect(result[0].ok).toBe(false);
+        expect(result[0].reason).toContain('连接超时');
+        vi.restoreAllMocks();
+    }, 5_000);
 });
 
 describe('McpGateway 平台 REST 面（/api/platform）', () => {
@@ -283,6 +332,81 @@ describe('McpGateway 平台 REST 面（/api/platform）', () => {
             expect(upstreamCalls).toBe(2);
         } finally {
             vi.restoreAllMocks();
+        }
+    });
+});
+
+describe('McpGateway MCP 协议面（/api/mcp）', () => {
+    const servers: Server[] = [];
+
+    function listen(app: ReturnType<typeof express>): Promise<string> {
+        return new Promise((resolve) => {
+            const server = app.listen(0, '127.0.0.1', () => {
+                servers.push(server);
+                const addr = server.address();
+                if (addr && typeof addr === 'object') {
+                    resolve(`http://127.0.0.1:${addr.port}`);
+                }
+            });
+        });
+    }
+
+    afterEach(async () => {
+        await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))));
+    });
+
+    /**
+     * 回归测试（2026-10-08 需求拉取失败根因）：
+     * 聚合 server 曾用高层 McpServer.registerTool 注册上游原始 JSON Schema，
+     * registerTool 只接受 Zod schema —— 注册即抛错，首个 initialize 请求 500，
+     * Claude CLI 视 adw-platform 为坏 server，模型拿不到任何平台工具。
+     * 这里用官方 MCP 客户端走真实协议：initialize → tools/list → tools/call。
+     */
+    it('initialize + tools/list + tools/call 全链路：inputSchema 原样透传（JSON Schema，非 Zod）', async () => {
+        const registry = getPlatformToolRegistry();
+        registry.register({
+            name: 'test__echo',
+            label: 'Echo',
+            description: '回显输入',
+            category: 'mcp',
+            inputSchema: {type: 'object', properties: {text: {type: 'string'}}, required: ['text']},
+            async execute(args) {
+                return {text: `echo: ${String(args.text ?? '')}`};
+            },
+        });
+        const gateway = new McpGateway(emptyRegistry());
+        const app = express();
+        app.use(express.json());
+        gateway.attachToExpress(app, '/api/mcp');
+        const base = await listen(app);
+
+        const client = new Client({name: 'protocol-test', version: '1.0.0'});
+        const transport = new StreamableHTTPClientTransport(new URL(`${base}/api/mcp`));
+        try {
+            // 修复前此处直接抛「inputSchema must be a Zod schema or raw shape」
+            await client.connect(transport);
+
+            const tools = await client.listTools();
+            const echo = tools.tools.find((t) => t.name === 'test__echo');
+            expect(echo).toBeDefined();
+            // JSON Schema 原样下发（不要求调用方持有 Zod）
+            expect(echo!.inputSchema).toEqual({
+                type: 'object',
+                properties: {text: {type: 'string'}},
+                required: ['text'],
+            });
+
+            const result = await client.callTool({name: 'test__echo', arguments: {text: '协议面'}});
+            expect(result.isError).toBeFalsy();
+            const blocks = result.content as Array<{type: string; text: string}>;
+            expect(blocks[0].text).toBe('echo: 协议面');
+
+            // 未知工具回喂 isError 结果（协议不报错，模型可自行纠正）
+            const unknown = await client.callTool({name: 'nope', arguments: {}});
+            expect(unknown.isError).toBe(true);
+        } finally {
+            await client.close().catch(() => {});
+            registry.unregister('test__echo');
         }
     });
 });

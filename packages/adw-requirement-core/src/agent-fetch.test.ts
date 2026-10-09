@@ -144,6 +144,24 @@ describe('AgentFetchService.fetchByInput', () => {
         expect(JSON.stringify(chats[1].sent[0])).toContain('必须只是一个 JSON 对象');
     });
 
+    it('思考草稿污染：杂 JSON 片段不截胡，评分选出契约对象', async () => {
+        const {bridge} = fakeBridge();
+        const polluted = [
+            '让我分析一下这个任务。计划 {"step": 1} 先调用工具。',
+            '草稿 {"error": "这是思考不是最终答案"}。',
+            '',
+            '```json',
+            JSON.stringify({sourceServer: 'ones-api', id: 'K2', number: '#2', title: '污染测试'}),
+            '```',
+        ].join('\n');
+        const {llm} = fakeLlm([[textTurn(polluted)]]);
+        const service = new AgentFetchService({bridge, agentLlm: () => llm});
+
+        const detail = await service.fetchByInput('#2');
+        expect(detail.id).toBe('K2');
+        expect(detail.title).toBe('污染测试');
+    });
+
     it('工具执行异常：isError 结果回喂，agent 换路自愈', async () => {
         const {bridge, toolCalls} = fakeBridge({
             callServerTool: async (server: string, tool: string) => {
@@ -217,6 +235,22 @@ describe('AgentFetchService.searchByInput', () => {
         const {llm} = fakeLlm([[textTurn(JSON.stringify({error: '该源不支持搜索'}))]]);
         const service = new AgentFetchService({bridge, agentLlm: () => llm});
         await expect(service.searchByInput('x')).rejects.toThrow('agent 搜索失败: 该源不支持搜索');
+    });
+
+    it('items 对象契约：{items:[...]} 也能映射，思考草稿里的 error 不截胡', async () => {
+        const {bridge} = fakeBridge();
+        const polluted = [
+            '先 {"kw": "关键词"} 搜索，草稿 {"error": "中间产物"}。',
+            '```json',
+            JSON.stringify({items: [{id: 'B1', title: '结果一'}]}),
+            '```',
+        ].join('\n');
+        const {llm} = fakeLlm([[textTurn(polluted)]]);
+        const service = new AgentFetchService({bridge, agentLlm: () => llm});
+
+        const results = await service.searchByInput('关键词');
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject({id: 'B1', title: '结果一'});
     });
 
     it('非 JSON 输出：抛出解析错误', async () => {

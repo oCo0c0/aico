@@ -8,7 +8,7 @@
  * 引擎无关：通过 AgentLlm 端口抽象模型运行时（dsh-adw 宿主用 ctx.llm 适配），
  * MCP 工具面由 MCPBridgeService 提供（<server>__<tool> 前缀全局唯一）。
  */
-import { extractJsonValue } from './structured-json.js';
+import { extractBestJsonArray, extractBestJsonObject, extractJsonCandidates, extractJsonValue, } from './structured-json.js';
 import { mapJsonToDetailBase, mapJsonToRequirement, } from './requirement-sources/index.js';
 // === 常量 ===
 /** 系统提示词：角色 + 只读约束 + JSON 契约纪律 */
@@ -202,29 +202,55 @@ export class AgentFetchService {
         if (whitelist.length === 0) {
             throw new Error('未配置任何 MCP server，请先在需求源设置中添加');
         }
+        // 多候选评分提取：杂 JSON 片段（思考/草稿）得低分，完整契约对象胜出；同分取更靠后
+        const scoreDetail = (d) => {
+            let s = 0;
+            for (const k of ['id', 'number', 'title']) {
+                if (typeof d[k] === 'string' && d[k].trim() !== '')
+                    s += 5;
+            }
+            if (typeof d.sourceServer === 'string' && d.sourceServer.trim() !== '')
+                s += 2;
+            for (const k of ['status', 'priority', 'assignee', 'updatedAt', 'description']) {
+                if (typeof d[k] === 'string' && d[k].trim() !== '')
+                    s += 2;
+            }
+            for (const k of ['acceptanceCriteria', 'attachments', 'relatedIssues']) {
+                if (Array.isArray(d[k]) && d[k].length > 0)
+                    s += 2;
+            }
+            if (typeof d.error === 'string' && d.error.trim() !== '')
+                s += 1;
+            return s;
+        };
         let text = await this.runAgentChat(buildFetchPrompt(input), whitelist);
+        let lastReason = '';
         for (let attempt = 0; attempt <= MAX_PARSE_RETRIES; attempt++) {
-            const json = extractJsonValue(text);
-            if (json && typeof json === 'object' && !Array.isArray(json)) {
-                const data = json;
+            const best = extractBestJsonObject(text, scoreDetail);
+            if (best) {
+                const data = best.value;
                 if (typeof data.error === 'string' && data.error.trim() !== '') {
                     throw new Error(`agent 拉取失败: ${data.error}`);
                 }
-                if (!data.id && !data.number) {
-                    throw new Error('agent 输出缺少 id/number 字段');
+                if (data.id || data.number) {
+                    const detail = mapJsonToDetailBase(data);
+                    const sourceServer = typeof data.sourceServer === 'string' && data.sourceServer.trim() !== ''
+                        ? data.sourceServer.trim()
+                        : whitelist[0];
+                    return { ...detail, sourceServer };
                 }
-                const detail = mapJsonToDetailBase(data);
-                const sourceServer = typeof data.sourceServer === 'string' && data.sourceServer.trim() !== ''
-                    ? data.sourceServer.trim()
-                    : whitelist[0];
-                return { ...detail, sourceServer };
+                lastReason = `解析出 JSON 对象但缺少 id/number 字段（字段：${Object.keys(data).slice(0, 8).join('、') || '无'}）`;
+            }
+            else {
+                lastReason = '输出中未找到任何可解析的 JSON 对象（可能只有叙述文字或输出被截断）';
             }
             if (attempt === MAX_PARSE_RETRIES)
                 break;
-            // 解析失败：在同一会话纠正后重试（复用 runAgentChat 重新起会话并带上纠错指令）
-            text = await this.runAgentChat(buildFetchPrompt(input) + '\n\n上一次输出无法解析为 JSON，这次最终回复必须只是一个 JSON 对象。', whitelist);
+            // 解析失败：在同一会话纠正后重试（带上失败原因与输出结尾——最终答案通常在结尾）
+            text = await this.runAgentChat(buildFetchPrompt(input)
+                + `\n\n上一次输出无法解析为 JSON（原因：${lastReason}；输出结尾：…${text.slice(-400)}），这次最终回复必须只是一个 JSON 对象。`, whitelist);
         }
-        throw new Error('agent 输出无法解析为 JSON 契约');
+        throw new Error(`agent 输出无法解析为 JSON 契约（原因：${lastReason}；输出结尾：…${text.slice(-500)}）`);
     }
     /**
      * agent 中介源内搜索
@@ -236,20 +262,37 @@ export class AgentFetchService {
             throw new Error('未配置任何 MCP server，请先在需求源设置中添加');
         }
         const text = await this.runAgentChat(buildSearchPrompt(query), whitelist);
-        const json = extractJsonValue(text);
-        if (json && typeof json === 'object' && !Array.isArray(json)) {
-            const data = json;
-            if (typeof data.error === 'string' && data.error.trim() !== '') {
-                throw new Error(`agent 搜索失败: ${data.error}`);
+        const mapItems = (items) => items
+            .filter((item) => !!item && typeof item === 'object')
+            .map(mapJsonToRequirement);
+        // 多候选提取：数组契约 / {items:[...]} 对象契约 / error 对象，按「位置最靠后 = 最终答案」裁决，
+        // 避免思考草稿里的杂 JSON（如 {"error": ...}）截胡真正的结果
+        const bestArray = extractBestJsonArray(text);
+        let bestItems;
+        let errorObj;
+        for (const c of extractJsonCandidates(text)) {
+            if (!c.value || typeof c.value !== 'object' || Array.isArray(c.value))
+                continue;
+            const obj = c.value;
+            if (typeof obj.error === 'string' && obj.error.trim() !== '') {
+                if (!errorObj || c.index >= errorObj.index)
+                    errorObj = { error: obj.error, index: c.index };
             }
-            return [];
+            if (Array.isArray(obj.items)) {
+                if (!bestItems || c.index >= bestItems.index)
+                    bestItems = { items: obj.items, index: c.index };
+            }
         }
-        if (Array.isArray(json)) {
-            return json
-                .filter((item) => !!item && typeof item === 'object')
-                .map(mapJsonToRequirement);
+        const arrIdx = bestArray ? bestArray.index : -1;
+        if (errorObj && errorObj.index > arrIdx && (bestItems === undefined || errorObj.index > bestItems.index)) {
+            throw new Error(`agent 搜索失败: ${errorObj.error}`);
         }
-        throw new Error('agent 输出无法解析为 JSON 数组契约');
+        if (bestItems && (bestArray === undefined || bestItems.index >= bestArray.index)) {
+            return mapItems(bestItems.items);
+        }
+        if (bestArray)
+            return mapItems(bestArray.value);
+        throw new Error(`agent 输出无法解析为 JSON 数组契约（输出结尾：…${text.slice(-300)}）`);
     }
 }
 //# sourceMappingURL=agent-fetch.js.map

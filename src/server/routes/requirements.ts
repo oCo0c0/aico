@@ -10,12 +10,21 @@
 import {Router} from 'express';
 import {RequirementStoreService} from '../services/requirement-store-service.js';
 import type {MinerUService} from '../services/mineru-service.js';
-import type {RequirementAgentFetchService} from '../services/requirement-agent-fetch.js';
+import type {RequirementAgentFetchService, AgentFetchProgress} from '../services/requirement-agent-fetch.js';
 import {createAttachmentImageService} from '../services/ones-image-service.js';
 import type {MCPRegistryService} from '../services/mcp-registry-service.js';
 import {getErrorMessage} from '../utils/error-utils.js';
 import {mergeParsedIntoDescription} from '../utils/parse-merge.js';
 import {broadcast} from '../websocket.js';
+
+/**
+ * 构造 agent 拉取过程事件转发器：把 AgentFetchProgress 广播为 WebSocket
+ * `requirement:fetch_progress`（data 附 source 标记来源），前端实时渲染
+ * 工具调用 / 思考 / 重试等拉取过程。
+ */
+function emitFetchProgress(source: 'fetch' | 'search' | 'detail'): (event: AgentFetchProgress) => void {
+    return (event) => broadcast({type: 'requirement:fetch_progress', data: {...event, source}});
+}
 
 /**
  * 创建需求管理路由
@@ -349,7 +358,7 @@ export function createRequirementsRoutes(
                 return;
             }
 
-            const agentResult = await agentFetch.fetchByInput(id, mcpServerName);
+            const agentResult = await agentFetch.fetchByInput(id, mcpServerName, emitFetchProgress('fetch'));
             const detail = agentResult;
             const serverName = agentResult.sourceServer || mcpServerName || '';
 
@@ -399,6 +408,7 @@ export function createRequirementsRoutes(
                 });
             }
         } catch (err) {
+            broadcast({type: 'requirement:fetch_progress', data: {kind: 'failed', source: 'fetch', message: getErrorMessage(err)}});
             res.status(500).json({code: 'AGENT_FETCH_ERROR', message: getErrorMessage(err)});
         }
     });
@@ -422,9 +432,10 @@ export function createRequirementsRoutes(
                 return;
             }
             const server = req.query.server as string | undefined;
-            const results = await agentFetch.searchByInput(query, server);
+            const results = await agentFetch.searchByInput(query, server, emitFetchProgress('search'));
             res.json(results);
         } catch (err) {
+            broadcast({type: 'requirement:fetch_progress', data: {kind: 'failed', source: 'search', message: getErrorMessage(err)}});
             res.status(500).json({code: 'AGENT_FETCH_ERROR', message: getErrorMessage(err)});
         }
     });
@@ -449,9 +460,10 @@ export function createRequirementsRoutes(
                 res.status(404).json({code: 'NOT_FOUND', message: `Requirement ${req.params.id} not found in local store`});
                 return;
             }
-            const detail = await agentFetch.fetchByInput(req.params.id);
+            const detail = await agentFetch.fetchByInput(req.params.id, undefined, emitFetchProgress('detail'));
             res.json(detail);
         } catch (err) {
+            broadcast({type: 'requirement:fetch_progress', data: {kind: 'failed', source: 'detail', message: getErrorMessage(err)}});
             res.status(500).json({code: 'AGENT_FETCH_ERROR', message: getErrorMessage(err)});
         }
     });

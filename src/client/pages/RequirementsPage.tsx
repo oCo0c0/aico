@@ -24,6 +24,8 @@ import {Input} from '../components/ui/input';
 import {MarkdownContent} from '../components/MarkdownContent';
 import {RequirementSourceSelector} from '../components/RequirementSourceSelector';
 import {Card, CardContent} from '../components/ui/card';
+import {RequirementFetchActivity} from '../components/RequirementFetchActivity';
+import type {FetchActivityItem, RequirementFetchProgressEvent} from '../components/RequirementFetchActivity';
 import {
     Search,
     X,
@@ -128,6 +130,19 @@ export default function RequirementsPage(): JSX.Element {
     const [searching, setSearching] = useState(false);
     const [searchError, setSearchError] = useState<string | null>(null);
     const [showSearch, setShowSearch] = useState(false);
+
+    /** agent 拉取/搜索过程活动行（WS requirement:fetch_progress → CustomEvent 驱动） */
+    const [activity, setActivity] = useState<FetchActivityItem[]>([]);
+    const [activityRunning, setActivityRunning] = useState(false);
+    const [activityOpen, setActivityOpen] = useState(false);
+    /** 当前活动来源（决定面板标题与挂载位置） */
+    const [activityMode, setActivityMode] = useState<'fetch' | 'search'>('fetch');
+    /** 活动行自增 id */
+    const activitySeq = useRef(0);
+    /** 事件流真身（ref 镜像：工具配对等可变操作在 updater 外完成，setState 只做替换） */
+    const activityRef = useRef<FetchActivityItem[]>([]);
+    /** toolUseId → 活动行 id（tool_result 回填状态用） */
+    const toolItemIds = useRef(new Map<string, number>());
 
     const [editing, setEditing] = useState(false);
     const [editTitle, setEditTitle] = useState('');
@@ -362,6 +377,83 @@ export default function RequirementsPage(): JSX.Element {
         }
     };
 
+    /** 开始一轮新的 agent 活动：清空过程行、打开面板并标记运行中 */
+    const startActivity = (mode: 'fetch' | 'search') => {
+        activityRef.current = [];
+        toolItemIds.current.clear();
+        setActivity([]);
+        setActivityMode(mode);
+        setActivityRunning(true);
+        setActivityOpen(true);
+    };
+
+    /** 结束活动（成功/失败都停掉头部转圈） */
+    const finishActivity = () => setActivityRunning(false);
+
+    /**
+     * 把过程事件折叠进活动行：工具行按 toolUseId 配对状态（running → ok/error），
+     * 思考/正文连续增量合并进同一行（只保留尾部 1500 字），上限 400 行。
+     */
+    const applyActivityEvent = useCallback((ev: RequirementFetchProgressEvent) => {
+        const rows = activityRef.current;
+        const push = (item: Omit<FetchActivityItem, 'id'>) => {
+            rows.push({...item, id: ++activitySeq.current});
+        };
+        const coalesce = (kind: FetchActivityItem['kind'], text: string) => {
+            const last = rows[rows.length - 1];
+            if (last && last.kind === kind) {
+                last.detail = `${last.detail ?? ''}${text}`.slice(-1500);
+            } else {
+                push({kind, label: '', detail: text});
+            }
+        };
+        switch (ev.kind) {
+            case 'started':
+                push({kind: 'info', label: ev.message || ''});
+                break;
+            case 'tool_use': {
+                const item: FetchActivityItem = {
+                    id: ++activitySeq.current,
+                    kind: 'tool',
+                    label: ev.toolName || '(unknown)',
+                    detail: ev.toolInput || '',
+                    status: 'running',
+                };
+                rows.push(item);
+                if (ev.toolUseId) toolItemIds.current.set(ev.toolUseId, item.id);
+                break;
+            }
+            case 'tool_result': {
+                const itemId = ev.toolUseId ? toolItemIds.current.get(ev.toolUseId) : undefined;
+                const row = itemId !== undefined ? rows.find(r => r.id === itemId) : undefined;
+                if (row) row.status = ev.isError ? 'error' : 'ok';
+                break;
+            }
+            case 'thinking':
+                if (ev.text) coalesce('thought', ev.text);
+                break;
+            case 'text':
+                if (ev.text) coalesce('text', ev.text);
+                break;
+            case 'attempt_retry':
+            case 'parse_failed':
+                push({kind: 'retry', label: ev.message || ''});
+                break;
+            case 'done':
+            case 'failed':
+                // 收尾：不再有结果的工具行停止转圈
+                for (const row of rows) {
+                    if (row.kind === 'tool' && row.status === 'running') row.status = 'ok';
+                }
+                push(ev.kind === 'done'
+                    ? {kind: 'success', label: ev.message || ''}
+                    : {kind: 'error', label: ev.message || ''});
+                break;
+        }
+        if (rows.length > 400) activityRef.current = rows.slice(rows.length - 400);
+        setActivity([...activityRef.current]);
+    }, []);
+
     // 监听后端图片下载完成事件，刷新需求描述（图片 URL 从远程变为本地路径）
     useEffect(() => {
         const handler = (e: Event) => {
@@ -377,6 +469,16 @@ export default function RequirementsPage(): JSX.Element {
         return () => window.removeEventListener('requirement:updated', handler);
     }, [selected?.id]);
 
+    // 监听 agent 拉取过程事件（requirement:fetch_progress → requirement:fetch-progress）
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const ev = (e as CustomEvent<RequirementFetchProgressEvent>).detail;
+            if (ev) applyActivityEvent(ev);
+        };
+        window.addEventListener('requirement:fetch-progress', handler);
+        return () => window.removeEventListener('requirement:fetch-progress', handler);
+    }, [applyActivityEvent]);
+
     /**
      * 通过 ID 从 MCP 获取需求并保存到本地
      * 获取成功后自动更新列表、选中该需求并同步到全局状态
@@ -385,6 +487,7 @@ export default function RequirementsPage(): JSX.Element {
         if (!fetchId.trim()) return;
         setFetching(true);
         setFetchError(null);
+        startActivity('fetch');
         try {
             const req = await apiPost<StoredRequirement>('/requirements/fetch', {
                 id: fetchId.trim(),
@@ -403,6 +506,7 @@ export default function RequirementsPage(): JSX.Element {
             setFetchError(err instanceof Error ? err.message : 'Failed to fetch requirement');
         } finally {
             setFetching(false);
+            finishActivity();
         }
     };
 
@@ -414,6 +518,7 @@ export default function RequirementsPage(): JSX.Element {
         if (!searchQuery.trim()) return;
         setSearching(true);
         setSearchError(null);
+        startActivity('search');
         try {
             const results = await apiGet<Requirement[]>(
                 `/requirements/search?q=${encodeURIComponent(searchQuery)}` +
@@ -424,6 +529,7 @@ export default function RequirementsPage(): JSX.Element {
             setSearchError(err instanceof Error ? err.message : 'Search failed');
         } finally {
             setSearching(false);
+            finishActivity();
         }
     };
 
@@ -432,6 +538,7 @@ export default function RequirementsPage(): JSX.Element {
      * 调用与按 ID 获取相同的接口，确保获取完整信息
      */
     const handleSaveFromSearch = async (req: Requirement) => {
+        startActivity('fetch');
         try {
             const saved = await apiPost<StoredRequirement>('/requirements/fetch', {
                 id: req.id,
@@ -446,6 +553,8 @@ export default function RequirementsPage(): JSX.Element {
             setSelectedRequirement(saved);
         } catch (err) {
             setFetchError(err instanceof Error ? err.message : 'Failed to save requirement');
+        } finally {
+            finishActivity();
         }
     };
 
@@ -626,11 +735,25 @@ export default function RequirementsPage(): JSX.Element {
                     {t('requirements.parseDocuments')}
                 </label>
 
-                {/* 获取失败的错误提示 */}
+                {/* agent 拉取过程活动面板（工具调用/思考/重试实时展示） */}
+                <RequirementFetchActivity
+                    items={activity}
+                    running={activityRunning}
+                    mode={activityMode}
+                    open={activityOpen && activityMode === 'fetch'}
+                    onToggle={() => setActivityOpen(!activityOpen)}
+                />
+
+                {/* 获取失败的错误提示（多行详情：原因 + 输出首尾摘录，等宽字体保留排版） */}
                 {fetchError && (
-                    <div className="mt-2 flex items-center gap-2 text-sm text-destructive">
-                        <AlertCircle className="h-4 w-4 shrink-0"/>
-                        {fetchError}
+                    <div className="mt-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                        <div className="flex items-center gap-2 font-medium">
+                            <AlertCircle className="h-4 w-4 shrink-0"/>
+                            {t('requirements.fetchFailedTitle')}
+                        </div>
+                        <pre
+                            className="mt-1 break-all whitespace-pre-wrap pl-6 font-mono text-xs leading-relaxed text-destructive/90"
+                        >{fetchError}</pre>
                     </div>
                 )}
 
@@ -805,8 +928,26 @@ export default function RequirementsPage(): JSX.Element {
                                 <X className="h-4 w-4"/>
                             </Button>
                         </div>
+                        {/* agent 搜索过程活动面板 */}
+                        <RequirementFetchActivity
+                            items={activity}
+                            running={activityRunning}
+                            mode={activityMode}
+                            open={activityOpen && activityMode === 'search'}
+                            onToggle={() => setActivityOpen(!activityOpen)}
+                        />
+
+                        {/* 搜索失败的错误提示（多行详情） */}
                         {searchError && (
-                            <p className="mt-2 text-xs text-destructive">{searchError}</p>
+                            <div className="mt-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                                <div className="flex items-center gap-2 font-medium">
+                                    <AlertCircle className="h-4 w-4 shrink-0"/>
+                                    {t('requirements.searchFailedTitle')}
+                                </div>
+                                <pre
+                                    className="mt-1 break-all whitespace-pre-wrap pl-6 font-mono text-xs leading-relaxed text-destructive/90"
+                                >{searchError}</pre>
+                            </div>
                         )}
                         {/* 搜索结果列表，每个结果可单独保存 */}
                         {searchResults.length > 0 && (

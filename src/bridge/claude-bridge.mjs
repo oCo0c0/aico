@@ -403,6 +403,7 @@ async function handleExecute(msg) {
         extendedThinking,
         permissionEnabled,
         permissionMode,
+        allowDangerouslySkipPermissions,
     } = params;
 
     if (!prompt) {
@@ -442,6 +443,9 @@ async function handleExecute(msg) {
         abortController,
         // 权限模式由服务端按全局配置下发（default/acceptEdits/bypassPermissions），缺省 acceptEdits
         permissionMode: permissionMode || 'acceptEdits',
+        // bypassPermissions 在无头模式下需要显式接受免责声明，否则 CLI 静默降级为
+        // default：MCP 等工具全部走 ask 分支并被无头自动拒绝（"you haven't granted it yet"）。
+        ...(allowDangerouslySkipPermissions ? {allowDangerouslySkipPermissions: true} : {}),
         ...(sessionId ? {resume: sessionId} : {}),
         ...(skills ? {skills} : {}),
         ...(mcpServers ? {mcpServers} : {}),

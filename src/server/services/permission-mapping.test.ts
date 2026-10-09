@@ -2,9 +2,9 @@ import {describe, it, expect} from 'vitest';
 import {resolveClaudePermission, resolvePiPermissionMode} from './permission-mapping.js';
 
 describe('resolveClaudePermission', () => {
-    it('bypass：完全放行，且不注入确认回调', () => {
+    it('bypass：完全放行，不注入确认回调，且携带无头免责声明 flag', () => {
         expect(resolveClaudePermission('bypassPermissions', true))
-            .toEqual({permissionMode: 'bypassPermissions', permissionEnabled: false});
+            .toEqual({permissionMode: 'bypassPermissions', permissionEnabled: false, allowDangerouslySkipPermissions: true});
     });
     it('confirm + 有确认 UI：default + 启用回调', () => {
         expect(resolveClaudePermission('confirm', true))

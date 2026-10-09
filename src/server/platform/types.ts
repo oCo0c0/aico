@@ -64,7 +64,7 @@ export interface PlatformToolContext {
  * @description 平台原生工具与 MCP 网关转发工具统一描述。
  * 投影层负责转换为各引擎的工具类型：
  * - pi: customTools（ToolDefinition）
- * - claude: 平台 MCP 网关聚合暴露（registerTool）
+ * - claude: 平台 MCP 网关聚合暴露（低层 Server 显式 handler，inputSchema 原样透传）
  */
 export interface PlatformToolDefinition {
     /** 工具名（全局唯一；MCP 转发工具为 <server>__<tool> 格式） */

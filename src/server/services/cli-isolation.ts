@@ -173,6 +173,63 @@ function seedReferencedSessions(engine: EngineId, home: string): number {
 const ensured = new Set<EngineId>();
 
 /**
+ * claude 侧平台 MCP 聚合 server 名。必须与 src/server/platform/mcp-gateway.ts
+ * 的 PLATFORM_MCP_SERVER_NAME 保持一致：claude 看到的工具全名是
+ * `mcp__<server>__<upstream>__<tool>`，permissions.allow 规则按该前缀匹配。
+ */
+const CLAUDE_PLATFORM_MCP_SERVER = 'adw-platform';
+
+/**
+ * 保证隔离 claude home 满足「无头引擎」的两个权限前提（幂等，只补缺失，不动其它字段）。
+ *
+ * 背景（无头拉需求被拒的根因，2026-10-08）：
+ *  1. `.claude.json` 缺 `bypassPermissionsModeAccepted` —— claude 2.x 在无头模式下
+ *     `--permission-mode bypassPermissions` 要求先交互式接受过免责声明，否则**静默降级
+ *     default**（CLI 二进制内确认的降级逻辑）。真实 home 是用户交互接受过的；隔离 home
+ *     是新生的，永远没有交互机会 → 必须由应用代为接受（隔离 home 本就是应用自管沙箱）。
+ *  2. `settings.json` 的 `permissions.allow` 全是「直连时代」前缀（`mcp__ones-api__*` 等，
+ *     首次播种从真实配置拷来）——网关架构下所有 MCP 工具挂在平台聚合 server 名下，
+ *     全名 `mcp__adw-platform__...`，一条 allow 规则都匹配不上 → 每次工具调用都落
+ *     「待授权」→ 无头自动拒绝。并入平台前缀规则后，与模式无关地放行平台工具
+ *     （SDK 未传 settingSources → 用户级 settings.json 默认加载，规则生效）。
+ *
+ * 只写应用自管的隔离 home，绝不触碰用户真实 CLI 配置。
+ *
+ * @returns 本次实际补上的条目描述（用于日志；空数组 = 已满足，无写入）
+ */
+export function applyClaudeHeadlessGrants(home: string): string[] {
+    const applied: string[] = [];
+
+    // ① .claude.json：bypassPermissionsModeAccepted
+    const configPath = path.join(home, '.claude.json');
+    let config: Record<string, unknown> = {};
+    try {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    } catch { /* 不存在或损坏 → 从空对象重建（该文件本就是 CLI 可自建的状态文件） */ }
+    if (config.bypassPermissionsModeAccepted !== true) {
+        config.bypassPermissionsModeAccepted = true;
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+        applied.push('.claude.json:bypassPermissionsModeAccepted');
+    }
+
+    // ② settings.json：permissions.allow 并入平台聚合前缀
+    const settingsPath = path.join(home, 'settings.json');
+    const platformAllow = `mcp__${CLAUDE_PLATFORM_MCP_SERVER}__*`;
+    let settings: {permissions?: {allow?: string[]}} = {};
+    try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as typeof settings;
+    } catch { /* 不存在/损坏 → 跳过（播种会先拷入；无 settings 时走模式路径） */ }
+    const allow = settings.permissions?.allow;
+    if (Array.isArray(allow) && !allow.includes(platformAllow)) {
+        allow.push(platformAllow);
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+        applied.push(`settings.json:permissions.allow+=${platformAllow}`);
+    }
+
+    return applied;
+}
+
+/**
  * 确保引擎的隔离 home 可用。
  *
  * - home 不存在 → 从 CLI 目录播种白名单条目（不存在则创建空 home）
@@ -217,6 +274,16 @@ export function ensureIsolatedHome(engine: EngineId, opts: {force?: boolean} = {
         const sessionSub = CLI_SESSION_DIRS[engine];
         if (!fs.existsSync(path.join(home, sessionSub))) {
             seededSessions = seedReferencedSessions(engine, home);
+        }
+
+        // claude 无头权限前提（幂等，只补缺失）：隔离 home 新生，永远没有交互机会
+        // 接受 bypass 免责声明；播种来的 allow 规则也可能是直连时代前缀（匹配不上
+        // 平台聚合 server）。缺失会导致无头下 MCP 工具调用被静默拒绝。
+        if (engine === 'claude') {
+            const granted = applyClaudeHeadlessGrants(home);
+            if (granted.length > 0) {
+                console.log(`[cli-isolation] claude 隔离目录补无头权限前提：${granted.join('、')}`);
+            }
         }
     } catch (err) {
         throw new Error(`初始化 ${engine} 隔离目录失败：${home}（${err instanceof Error ? err.message : String(err)}）`);

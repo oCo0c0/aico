@@ -473,3 +473,93 @@ describe('piSessionDir', () => {
         expect(a.length).toBeGreaterThan(0);
     });
 });
+
+/**
+ * 看门狗「无活动」语义（用户报告：健康长任务恰在 30 分钟整被杀）。
+ * 旧实现是启动时设定一次的绝对定时器；新实现任何事件都重置，
+ * 只有事件流彻底沉寂（疑似卡死）才中止。
+ */
+describe('PiProvider 看门狗（无活动语义）', () => {
+    const MIN = 60 * 1000;
+
+    it('整轮看门狗：30 分钟无任何事件（疑似卡死）→ 发 abort 并收尾', async () => {
+        vi.useFakeTimers();
+        try {
+            const {provider, getRpc} = makeProvider();
+            const outputs: string[] = [];
+            const resultPromise = provider.run(
+                {prompt: 'p', cwd: 'D:/ws/project'},
+                {onOutput: (data) => outputs.push(data), modelProvider: 'deepseek', model: 'm'},
+            );
+            await vi.advanceTimersByTimeAsync(1); // 让 startRpc / prompt 预检落定
+            expect(getRpc()?.sent.some((c) => c.type === 'prompt')).toBe(true);
+
+            await vi.advanceTimersByTimeAsync(30 * MIN);
+
+            const result = await resultPromise;
+            expect(getRpc()?.sent.some((c) => c.type === 'abort')).toBe(true);
+            expect(outputs.join('')).toContain('疑似卡死');
+            expect(result.exitCode).toBe(0); // 看门狗路径：非用户中止、非模型错误
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('整轮看门狗重置：事件心跳让 60 分钟的长任务一直存活', async () => {
+        vi.useFakeTimers();
+        try {
+            const {provider, getRpc} = makeProvider();
+            const resultPromise = provider.run(
+                {prompt: 'p', cwd: 'D:/ws/project'},
+                {modelProvider: 'deepseek', model: 'm'},
+            );
+            await vi.advanceTimersByTimeAsync(1);
+            const rpc = getRpc()!;
+
+            // 每 10 分钟一次心跳（< 30 分钟阈值），共 60 分钟 > 旧绝对阈值
+            for (let i = 0; i < 6; i++) {
+                await vi.advanceTimersByTimeAsync(10 * MIN);
+                rpc.emit({type: 'message_update', assistantMessageEvent: {type: 'text_delta', delta: `t${i}`}});
+                expect(rpc.sent.some((c) => c.type === 'abort')).toBe(false);
+            }
+
+            rpc.emit({type: 'agent_end', messages: []});
+            const result = await resultPromise;
+            expect(result.exitCode).toBe(0);
+            expect(rpc.sent.some((c) => c.type === 'abort')).toBe(false);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('工具看门狗：部分输出会重置；10 分钟零输出才判定疑似挂死', async () => {
+        vi.useFakeTimers();
+        try {
+            const {provider, getRpc} = makeProvider();
+            const resultPromise = provider.run(
+                {prompt: 'p', cwd: 'D:/ws/project'},
+                {modelProvider: 'deepseek', model: 'm'},
+            );
+            await vi.advanceTimersByTimeAsync(1);
+            const rpc = getRpc()!;
+
+            rpc.emit({type: 'tool_execution_start', toolCallId: 'tc-1', toolName: 'bash', args: {cmd: 'build'}});
+            await vi.advanceTimersByTimeAsync(9 * MIN);
+            expect(rpc.sent.some((c) => c.type === 'abort')).toBe(false);
+
+            // 部分输出到达 → 工具看门狗重置
+            rpc.emit({type: 'tool_execution_update', toolCallId: 'tc-1', partialResult: {text: '...compiling'}});
+            await vi.advanceTimersByTimeAsync(9 * MIN);
+            expect(rpc.sent.some((c) => c.type === 'abort')).toBe(false);
+
+            // 重置后再沉寂满 10 分钟 → 中止
+            await vi.advanceTimersByTimeAsync(MIN + 1);
+            expect(rpc.sent.some((c) => c.type === 'abort')).toBe(true);
+
+            rpc.emit({type: 'agent_end', messages: []});
+            await resultPromise;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});

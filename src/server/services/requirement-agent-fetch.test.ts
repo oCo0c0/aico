@@ -5,29 +5,52 @@
  * 覆盖：
  * - 正常路径：引擎返回契约 JSON → 映射为 RequirementDetail + sourceServer
  * - 容忍代码块围栏/前后杂文字的 JSON 提取
+ * - 思考污染 stdout：叙述文本里的杂 `{` 片段不截胡，多候选评分选出契约对象
  * - 引擎返回 {"error": ...} → 抛出可读错误
- * - 首次输出不合法 → 自动重试一次（prompt 携带修正指令）
- * - 重试仍失败 → 抛出含原始输出摘要的错误
- * - 引擎 exitCode !== 0 → 抛出引擎执行失败
+ * - 首次输出不合法 → 自动重试一次（prompt 携带原因 + 输出结尾）
+ * - 重试仍失败 → 抛出含「原因 + 输出开头/结尾」的详细错误
+ * - 引擎 exitCode !== 0 → 抛出引擎执行失败（附 stderr）
+ * - maxTurnsReached → 视为本轮失败并带原因重试（runBridge 收到 maxTurns=30）
+ * - onOutput → onProgress 过程事件转发（started/tool_use/tool_result/done）
  * - MCP 白名单：preferredServer → runBridge 收到单源注入；未指定 → 全量 enabled
+ * - search：items 映射 / 空列表 / {"error"} / 杂 JSON 容忍 / 重试仍失败
  */
 
 import {describe, it, expect} from 'vitest';
 import {RequirementAgentFetchService} from './requirement-agent-fetch.js';
-import type {AgentFetchRunner} from './requirement-agent-fetch.js';
+import type {AgentFetchProgress, AgentFetchRunner} from './requirement-agent-fetch.js';
 
-/** 可编程 fake runner：按调用顺序返回预设结果 */
-function makeRunner(results: Array<{exitCode?: number | null; stdout: string; stderr?: string}>): {
+/** fake runner 的单次预设结果（stream = runBridge 解析 stdout 前依序发出的引擎事件） */
+type FakeResult = {
+    exitCode?: number | null;
+    stdout: string;
+    stderr?: string;
+    aborted?: boolean;
+    maxTurnsReached?: boolean;
+    stream?: Array<{ data?: string; meta?: Record<string, unknown> }>;
+};
+
+/** 可编程 fake runner：按调用顺序返回预设结果，先回放 stream 事件再 resolve */
+function makeRunner(results: FakeResult[]): {
     runner: AgentFetchRunner;
-    calls: Array<{prompt: string; cwd?: string; mcpServers?: unknown}>;
+    calls: Array<{ prompt: string; cwd?: string; mcpServers?: unknown; maxTurns?: number; permissionMode?: string }>;
 } {
-    const calls: Array<{prompt: string; cwd?: string; mcpServers?: unknown}> = [];
+    const calls: Array<{ prompt: string; cwd?: string; mcpServers?: unknown; maxTurns?: number; permissionMode?: string }> = [];
     let i = 0;
     const runner: AgentFetchRunner = {
-        runBridge: async (input) => {
-            calls.push({prompt: input.prompt, cwd: input.cwd, mcpServers: input.mcpServers});
+        runBridge: async (input, options) => {
+            calls.push({prompt: input.prompt, cwd: input.cwd, mcpServers: input.mcpServers, maxTurns: input.maxTurns, permissionMode: options?.permissionMode});
             const r = results[Math.min(i++, results.length - 1)];
-            return {exitCode: r.exitCode ?? 0, stdout: r.stdout, stderr: r.stderr ?? ''};
+            for (const ev of r.stream ?? []) {
+                options?.onOutput?.(ev.data ?? '', ev.meta as never);
+            }
+            return {
+                exitCode: r.exitCode ?? 0,
+                stdout: r.stdout,
+                stderr: r.stderr ?? '',
+                aborted: r.aborted ?? false,
+                maxTurnsReached: r.maxTurnsReached,
+            };
         },
     };
     return {runner, calls};
@@ -92,6 +115,10 @@ describe('RequirementAgentFetchService', () => {
         // 白名单：preferredServer → 单源
         expect(rm.seen[0]).toEqual(['ones-api']);
         expect(calls[0].mcpServers).toBeDefined();
+        // 防截断：maxTurns 提升到 30（bridge 默认 10 对多工具拉取太紧）
+        expect(calls[0].maxTurns).toBe(30);
+        // 无头放行：acceptEdits 会把 MCP 工具调用全部拒绝（permission not granted）
+        expect(calls[0].permissionMode).toBe('bypassPermissions');
     });
 
     it('容忍代码块围栏与前后杂文字', async () => {
@@ -99,6 +126,22 @@ describe('RequirementAgentFetchService', () => {
         const {runner} = makeRunner([{stdout: fenced}]);
         const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
         const detail = await svc.fetchByInput('CWXT-302');
+        expect(detail.title).toContain('YFGL-302');
+    });
+
+    it('思考污染 stdout：叙述里的杂 JSON 片段不截胡，评分选出契约对象', async () => {
+        // 复刻 Claude 引擎历史行为：thinking 也写进 stdout，且开头是英文叙述
+        const polluted = [
+            'Let me analyze this task. The user wants me to act as a requirements-fetching agent.',
+            '计划先 {"step": 1} 调用工具，草稿 {"error": "这是思考不是最终答案"}。',
+            '',
+            '```json',
+            CONTRACT_JSON,
+            '```',
+        ].join('\n');
+        const {runner} = makeRunner([{stdout: polluted}]);
+        const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
+        const detail = await svc.fetchByInput('302');
         expect(detail.title).toContain('YFGL-302');
     });
 
@@ -126,6 +169,8 @@ describe('RequirementAgentFetchService', () => {
         expect(detail.title).toContain('YFGL-302');
         expect(calls).toHaveLength(2);
         expect(calls[1].prompt).toContain('未能解析为符合契约的 JSON');
+        // 修正指令要带「输出结尾」——真正的 JSON 通常在结尾，只给开头等于没给反馈
+        expect(calls[1].prompt).toContain('输出结尾');
     });
 
     it('重试仍失败 → 抛出含原始输出摘要的错误', async () => {
@@ -140,11 +185,60 @@ describe('RequirementAgentFetchService', () => {
         await expect(svc.fetchByInput('302')).rejects.toThrow('agent 引擎执行失败');
     });
 
-    it('缺 title 视为不符合契约（触发重试/失败路径）', async () => {
+    it('缺 title → 失败错误包含「原因 + 输出结尾」详情（不再只给开头叙述）', async () => {
         const noTitle = JSON.stringify({id: 'x', description: 'd'});
         const {runner} = makeRunner([{stdout: noTitle}, {stdout: noTitle}]);
         const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
-        await expect(svc.fetchByInput('302')).rejects.toThrow(/不符合 JSON 契约/);
+        const err = await svc.fetchByInput('302').then(() => null, (e: Error) => e);
+        expect(err).not.toBeNull();
+        expect(err!.message).toContain('不符合 JSON 契约');
+        expect(err!.message).toContain('原因：缺少必需字段: title');
+        expect(err!.message).toContain('输出结尾：');
+        expect(err!.message).toContain('"description":"d"');
+    });
+
+    it('maxTurnsReached → 本轮按失败重试并携带轮次原因；二轮成功', async () => {
+        const {runner, calls} = makeRunner([
+            {stdout: '', maxTurnsReached: true},
+            {stdout: CONTRACT_JSON},
+        ]);
+        const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
+        const detail = await svc.fetchByInput('302');
+        expect(detail.title).toContain('YFGL-302');
+        expect(calls).toHaveLength(2);
+        expect(calls[1].prompt).toContain('最大工具调用轮次');
+    });
+
+    it('onOutput 引擎事件 → onProgress 过程事件（started/tool_use/tool_result/done）', async () => {
+        const {runner, calls} = makeRunner([{
+            stdout: CONTRACT_JSON,
+            stream: [
+                {data: '让我先看看可用的工具', meta: {type: 'thinking'}},
+                {meta: {type: 'tool_use', toolName: 'ones__get_issue', toolInput: {id: '302'}, toolUseId: 't1'}},
+                {data: '已找到', meta: {type: 'tool_result', toolUseId: 't1', isError: false}},
+                {data: CONTRACT_JSON, meta: undefined},
+            ],
+        }]);
+        const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
+
+        const events: AgentFetchProgress[] = [];
+        await svc.fetchByInput('302', 'ones-api', ev => events.push(ev));
+
+        // started 附带挂载的白名单说明
+        expect(events[0].kind).toBe('started');
+        expect(events[0].message).toContain('目标 MCP server：ones-api');
+        // 思考 → 过程事件
+        expect(events.some(e => e.kind === 'thinking' && e.text?.includes('让我先看看'))).toBe(true);
+        // 工具调用与结果
+        expect(events.some(e => e.kind === 'tool_use' && e.toolName === 'ones__get_issue' && e.toolInput === '{"id":"302"}')).toBe(true);
+        expect(events.some(e => e.kind === 'tool_result' && e.toolUseId === 't1' && e.isError === false)).toBe(true);
+        // 最终成功
+        expect(events[events.length - 1].kind).toBe('done');
+        // onOutput 仅在传入 onProgress 时才注入（不传则不打扰引擎流）
+        const bare = makeRunner([{stdout: CONTRACT_JSON}]);
+        await new RequirementAgentFetchService({cliRunner: bare.runner, mcpService, resolveMcp: makeResolveMcp().fn as never})
+            .fetchByInput('302');
+        expect(bare.calls[0].prompt).toContain('302');
     });
 
     it('runBridge 收到低推理强度与隔离 cwd', async () => {
@@ -152,6 +246,67 @@ describe('RequirementAgentFetchService', () => {
         const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
         await svc.fetchByInput('302');
         expect(calls[0].cwd).toContain('agent-fetch');
+    });
+
+    // === 上游就绪等待（ensureMcpReady 注入） ===
+
+    it('全部上游未就绪 → 快速失败且不启动引擎（不再让 agent 带空工具目录上场）', async () => {
+        const {runner, calls} = makeRunner([{stdout: CONTRACT_JSON}]);
+        const ensure = async (names: string[]) =>
+            names.map(name => ({name, ok: false, reason: '连接超时（90s 内未完成握手）'}));
+        const svc = new RequirementAgentFetchService({
+            cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never, ensureMcpReady: ensure,
+        });
+        await expect(svc.fetchByInput('302', 'ones-api')).rejects.toThrow(/MCP server 无法连接[\s\S]*ones-api：连接超时/);
+        expect(calls).toHaveLength(0); // 引擎一次都没跑
+    });
+
+    it('部分就绪 → 继续执行；过程事件报告各 server 结论', async () => {
+        const {runner} = makeRunner([{stdout: CONTRACT_JSON}]);
+        const events: AgentFetchProgress[] = [];
+        const ensure = async (names: string[]) => [
+            {name: names[0], ok: true, toolCount: 22},
+            {name: 'memory', ok: false, reason: 'spawn ENOENT'},
+        ];
+        const svc = new RequirementAgentFetchService({
+            cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never, ensureMcpReady: ensure,
+        });
+        const detail = await svc.fetchByInput('302', undefined, ev => events.push(ev));
+        expect(detail.title).toContain('YFGL-302');
+        expect(events.some(e => e.message?.includes('ones-api」已就绪（22 个工具）'))).toBe(true);
+        expect(events.some(e => e.message?.includes('memory」连接失败：spawn ENOENT'))).toBe(true);
+    });
+
+    it('就绪等待在引擎启动前执行（ensure 先于 runBridge）', async () => {
+        const order: string[] = [];
+        const {runner} = makeRunner([{stdout: CONTRACT_JSON}]);
+        const wrapped: AgentFetchRunner = {
+            runBridge: async (input, options) => {
+                order.push('runBridge');
+                return runner.runBridge(input, options);
+            },
+        };
+        const svc = new RequirementAgentFetchService({
+            cliRunner: wrapped,
+            mcpService,
+            resolveMcp: makeResolveMcp().fn as never,
+            ensureMcpReady: async () => {
+                order.push('ensure');
+                return [{name: 'ones-api', ok: true, toolCount: 22}];
+            },
+        });
+        await svc.fetchByInput('302');
+        expect(order).toEqual(['ensure', 'runBridge']);
+    });
+
+    it('未配置任何启用 server → 快速失败给出可操作指引（不烧引擎）', async () => {
+        const {runner, calls} = makeRunner([{stdout: CONTRACT_JSON}]);
+        const emptyMcp = {get: () => undefined, list: () => [{name: 'disabled-x', enabled: false}]};
+        const rm = makeResolveMcp();
+        const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService: emptyMcp, resolveMcp: rm.fn as never});
+        await expect(svc.fetchByInput('302')).rejects.toThrow('未配置任何启用的 MCP server');
+        expect(calls).toHaveLength(0);
+        expect(rm.seen).toHaveLength(0); // 未进入 resolveMcp
     });
 });
 
@@ -190,6 +345,19 @@ describe('RequirementAgentFetchService.searchByInput', () => {
         const {runner} = makeRunner([{stdout: JSON.stringify({error: '该源不支持搜索'})}]);
         const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
         await expect(svc.searchByInput('x')).rejects.toThrow('agent 搜索失败: 该源不支持搜索');
+    });
+
+    it('思考污染 stdout：杂 JSON 片段不截胡，评分选出 items 契约对象', async () => {
+        const pollutedSearch = [
+            '思考：先搜索 {"kw": "监控"}，再过滤草稿 {"error": "中间产物"}。',
+            '```json',
+            SEARCH_JSON,
+            '```',
+        ].join('\n');
+        const {runner} = makeRunner([{stdout: pollutedSearch}]);
+        const svc = new RequirementAgentFetchService({cliRunner: runner, mcpService, resolveMcp: makeResolveMcp().fn as never});
+        const list = await svc.searchByInput('监控');
+        expect(list).toHaveLength(2);
     });
 
     it('输出不合法 → 重试一次后仍失败则抛错', async () => {

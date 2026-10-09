@@ -12,7 +12,15 @@
 function parseBalanced(raw: string): unknown | undefined {
     const start = raw.search(/[\[{]/);
     if (start < 0) return undefined;
+    const span = balancedSpanAt(raw, start);
+    return span?.value;
+}
 
+/**
+ * 从指定起点做括号配平截取并 JSON.parse（跳过字符串内的括号）。
+ * @returns 解析值 + 结束索引（end = 闭合括号位置）；任一失败返回 undefined
+ */
+function balancedSpanAt(raw: string, start: number): { value: unknown; end: number } | undefined {
     const openChar = raw[start];
     const closeChar = openChar === '[' ? ']' : '}';
     let depth = 0;
@@ -40,15 +48,91 @@ function parseBalanced(raw: string): unknown | undefined {
             depth--;
             if (depth === 0) {
                 const candidate = raw.slice(start, i + 1);
-                try {
-                    return JSON.parse(candidate);
-                } catch {
-                    return undefined;
-                }
+                const value = tryParseJson(candidate);
+                return value === undefined ? undefined : {value, end: i};
             }
         }
     }
     return undefined;
+}
+
+/** JSON.parse 宽容版：失败时先剥掉字符串值之间的尾逗号再试一次 */
+function tryParseJson(text: string): unknown | undefined {
+    try {
+        return JSON.parse(text);
+    } catch {
+        // 继续尝试
+    }
+    try {
+        return JSON.parse(text.replace(/,(\s*[}\]])/g, '$1'));
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * 扫描文本中所有可解析的顶层 JSON 对象候选：每个不在字符串内的 `{` 起点做括号配平 + JSON.parse。
+ *
+ * 为什么不用单候选：LLM 输出常是「思考/叙述 + JSON」，前置文本里可能有杂 `{`
+ * （如示例、伪代码），单候选首个 `{` 会被截胡得到垃圾片段；这里穷举全部候选交给调用方评分。
+ * 已成功解析的对象内部不再回扫（跳到闭合括号之后），避免嵌套重复候选。
+ */
+export function extractJsonObjectCandidates(raw: string): Array<Record<string, unknown>> {
+    const objects: Array<Record<string, unknown>> = [];
+    if (!raw) return objects;
+
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+        if (inString) {
+            if (escape) {
+                escape = false;
+            } else if (ch === '\\') {
+                escape = true;
+            } else if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (ch === '"') {
+            inString = true;
+            continue;
+        }
+        if (ch === '{') {
+            const span = balancedSpanAt(raw, i);
+            if (span && span.value && typeof span.value === 'object' && !Array.isArray(span.value)) {
+                objects.push(span.value as Record<string, unknown>);
+                i = span.end; // 跳过已消费对象（嵌套 `{` 不重复作为候选）
+            }
+        }
+    }
+    return objects;
+}
+
+/**
+ * 在全部 JSON 对象候选中按评分取最优；同分取更靠后的候选
+ * （LLM 的最终答案通常在输出末尾，前面的多为思考中的示例）。
+ * @param raw 任意文本输出
+ * @param score 可选评分函数；缺省时取最后一个可解析对象
+ */
+export function extractBestJsonObject(
+    raw: string,
+    score?: (obj: Record<string, unknown>) => number,
+): Record<string, unknown> | undefined {
+    const candidates = extractJsonObjectCandidates(raw);
+    if (candidates.length === 0) return undefined;
+
+    let best: Record<string, unknown> | undefined;
+    let bestScore = -Infinity;
+    for (const obj of candidates) {
+        const s = score ? score(obj) : 0;
+        if (s >= bestScore) {
+            bestScore = s;
+            best = obj;
+        }
+    }
+    return best;
 }
 
 /**
@@ -57,7 +141,7 @@ function parseBalanced(raw: string): unknown | undefined {
  * @returns 解析出的值；全部失败返回 undefined
  */
 export function extractJsonValue(raw: string): unknown | undefined {
-    if (typeof raw !== 'string' || !raw) return undefined;
+    if (!raw) return undefined;
 
     // 1. fenced block：```json ... ```
     const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -93,7 +177,6 @@ export function extractJsonArray(raw: string): unknown[] | undefined {
  */
 export function parseFrontMatter(content: string): Record<string, string> {
     const result: Record<string, string> = {};
-    if (typeof content !== 'string') return result;
 
     const match = content.match(/^﻿?---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
     if (!match) return result;

@@ -23,4 +23,25 @@ export declare function extractJsonArray(raw: string): unknown[] | undefined;
  * @returns key → value 映射；无 front-matter 返回空对象
  */
 export declare function parseFrontMatter(content: string): Record<string, string>;
+/**
+ * 扫描字符串外每个 `{` / `[` 起点，逐个尝试配平+parse，返回全部成功候选（按出现顺序）。
+ * 成功消费的 span 整体跳过（嵌套对象不重复产出）；失败 span 的内部起点仍会逐个尝试。
+ */
+export declare function extractJsonCandidates(raw: string): Array<{
+    value: unknown;
+    index: number;
+}>;
+/**
+ * 按评分挑选最佳 JSON 对象候选；同分取更靠后（最终答案通常在结尾）。
+ * 评分函数抛错视为该候选 0 分。无候选返回 undefined。
+ */
+export declare function extractBestJsonObject(raw: string, score: (obj: Record<string, unknown>) => number): {
+    value: Record<string, unknown>;
+    index: number;
+} | undefined;
+/** 挑选最佳 JSON 数组候选（元素多者优先；同分取更靠后）。无候选返回 undefined。 */
+export declare function extractBestJsonArray(raw: string): {
+    value: unknown[];
+    index: number;
+} | undefined;
 //# sourceMappingURL=structured-json.d.ts.map

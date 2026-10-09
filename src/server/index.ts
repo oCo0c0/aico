@@ -173,6 +173,8 @@ export async function createServer(port: number): Promise<http.Server> {
     const requirementAgentFetchService = new RequirementAgentFetchService({
         cliRunner: cliRunnerService,
         mcpService: mcpRegistryService,
+        // 拉取前显式等待 MCP 上游就绪（目录软超时会静默跳过慢启动的 npx 上游）
+        ensureMcpReady: (names) => getMcpGateway().ensureUpstreamsReady(names),
     });
     const testExecutorService = new TestExecutorService();
     const skillsService = new SkillsService();

@@ -1,6 +1,6 @@
 {
   "name": "@along/aico",
-  "version": "2.5.4",
+  "version": "2.5.5",
   "description": "Aico — AI-powered development workbench integrating requirements, coding, and testing",
   "main": "dist-electron/electron/main.js",
   "types": "dist/server/index.d.ts",

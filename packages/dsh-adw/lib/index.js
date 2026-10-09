@@ -25174,6 +25174,95 @@ function extractJsonValue(raw) {
   }
   return parseBalanced(raw);
 }
+function tryParseJson(text2) {
+  try {
+    return JSON.parse(text2);
+  } catch {
+    try {
+      return JSON.parse(text2.replace(/,(\s*[}\]])/g, "$1"));
+    } catch {
+      return void 0;
+    }
+  }
+}
+function balancedSpanAt(raw, from) {
+  const open = raw[from];
+  const close = open === "[" ? "]" : "}";
+  let depth = 0;
+  let inString = false;
+  let escape2 = false;
+  for (let i = from; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escape2) escape2 = false;
+      else if (ch === "\\") escape2 = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return raw.slice(from, i + 1);
+    }
+  }
+  return void 0;
+}
+function extractJsonCandidates(raw) {
+  const candidates = [];
+  if (typeof raw !== "string" || !raw) return candidates;
+  let inString = false;
+  let escape2 = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escape2) escape2 = false;
+      else if (ch === "\\") escape2 = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch !== "{" && ch !== "[") continue;
+    const span = balancedSpanAt(raw, i);
+    if (!span) continue;
+    const value = tryParseJson(span);
+    if (value !== void 0) {
+      candidates.push({ value, index: i });
+      i += span.length - 1;
+    }
+  }
+  return candidates;
+}
+function extractBestJsonObject(raw, score) {
+  let best;
+  for (const c of extractJsonCandidates(raw)) {
+    if (!c.value || typeof c.value !== "object" || Array.isArray(c.value)) continue;
+    const obj = c.value;
+    let s = 0;
+    try {
+      s = score(obj);
+    } catch {
+      s = 0;
+    }
+    if (!best || s >= best.score) best = { value: obj, index: c.index, score: s };
+  }
+  return best ? { value: best.value, index: best.index } : void 0;
+}
+function extractBestJsonArray(raw) {
+  let best;
+  for (const c of extractJsonCandidates(raw)) {
+    if (!Array.isArray(c.value)) continue;
+    const s = c.value.length;
+    if (!best || s >= best.score) best = { value: c.value, index: c.index, score: s };
+  }
+  return best ? { value: best.value, index: best.index } : void 0;
+}
 
 // ../adw-requirement-core/src/requirement-sources/parsers.ts
 function mapJsonToRequirement(item) {
@@ -25396,28 +25485,48 @@ var AgentFetchService = class {
     if (whitelist.length === 0) {
       throw new Error("\u672A\u914D\u7F6E\u4EFB\u4F55 MCP server\uFF0C\u8BF7\u5148\u5728\u9700\u6C42\u6E90\u8BBE\u7F6E\u4E2D\u6DFB\u52A0");
     }
+    const scoreDetail = (d) => {
+      let s = 0;
+      for (const k of ["id", "number", "title"]) {
+        if (typeof d[k] === "string" && d[k].trim() !== "") s += 5;
+      }
+      if (typeof d.sourceServer === "string" && d.sourceServer.trim() !== "") s += 2;
+      for (const k of ["status", "priority", "assignee", "updatedAt", "description"]) {
+        if (typeof d[k] === "string" && d[k].trim() !== "") s += 2;
+      }
+      for (const k of ["acceptanceCriteria", "attachments", "relatedIssues"]) {
+        if (Array.isArray(d[k]) && d[k].length > 0) s += 2;
+      }
+      if (typeof d.error === "string" && d.error.trim() !== "") s += 1;
+      return s;
+    };
     let text2 = await this.runAgentChat(buildFetchPrompt(input), whitelist);
+    let lastReason = "";
     for (let attempt = 0; attempt <= MAX_PARSE_RETRIES; attempt++) {
-      const json = extractJsonValue(text2);
-      if (json && typeof json === "object" && !Array.isArray(json)) {
-        const data = json;
+      const best = extractBestJsonObject(text2, scoreDetail);
+      if (best) {
+        const data = best.value;
         if (typeof data.error === "string" && data.error.trim() !== "") {
           throw new Error(`agent \u62C9\u53D6\u5931\u8D25: ${data.error}`);
         }
-        if (!data.id && !data.number) {
-          throw new Error("agent \u8F93\u51FA\u7F3A\u5C11 id/number \u5B57\u6BB5");
+        if (data.id || data.number) {
+          const detail = mapJsonToDetailBase(data);
+          const sourceServer = typeof data.sourceServer === "string" && data.sourceServer.trim() !== "" ? data.sourceServer.trim() : whitelist[0];
+          return { ...detail, sourceServer };
         }
-        const detail = mapJsonToDetailBase(data);
-        const sourceServer = typeof data.sourceServer === "string" && data.sourceServer.trim() !== "" ? data.sourceServer.trim() : whitelist[0];
-        return { ...detail, sourceServer };
+        lastReason = `\u89E3\u6790\u51FA JSON \u5BF9\u8C61\u4F46\u7F3A\u5C11 id/number \u5B57\u6BB5\uFF08\u5B57\u6BB5\uFF1A${Object.keys(data).slice(0, 8).join("\u3001") || "\u65E0"}\uFF09`;
+      } else {
+        lastReason = "\u8F93\u51FA\u4E2D\u672A\u627E\u5230\u4EFB\u4F55\u53EF\u89E3\u6790\u7684 JSON \u5BF9\u8C61\uFF08\u53EF\u80FD\u53EA\u6709\u53D9\u8FF0\u6587\u5B57\u6216\u8F93\u51FA\u88AB\u622A\u65AD\uFF09";
       }
       if (attempt === MAX_PARSE_RETRIES) break;
       text2 = await this.runAgentChat(
-        buildFetchPrompt(input) + "\n\n\u4E0A\u4E00\u6B21\u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\u4E3A JSON\uFF0C\u8FD9\u6B21\u6700\u7EC8\u56DE\u590D\u5FC5\u987B\u53EA\u662F\u4E00\u4E2A JSON \u5BF9\u8C61\u3002",
+        buildFetchPrompt(input) + `
+
+\u4E0A\u4E00\u6B21\u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\u4E3A JSON\uFF08\u539F\u56E0\uFF1A${lastReason}\uFF1B\u8F93\u51FA\u7ED3\u5C3E\uFF1A\u2026${text2.slice(-400)}\uFF09\uFF0C\u8FD9\u6B21\u6700\u7EC8\u56DE\u590D\u5FC5\u987B\u53EA\u662F\u4E00\u4E2A JSON \u5BF9\u8C61\u3002`,
         whitelist
       );
     }
-    throw new Error("agent \u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\u4E3A JSON \u5951\u7EA6");
+    throw new Error(`agent \u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\u4E3A JSON \u5951\u7EA6\uFF08\u539F\u56E0\uFF1A${lastReason}\uFF1B\u8F93\u51FA\u7ED3\u5C3E\uFF1A\u2026${text2.slice(-500)}\uFF09`);
   }
   /**
    * agent 中介源内搜索
@@ -25429,18 +25538,29 @@ var AgentFetchService = class {
       throw new Error("\u672A\u914D\u7F6E\u4EFB\u4F55 MCP server\uFF0C\u8BF7\u5148\u5728\u9700\u6C42\u6E90\u8BBE\u7F6E\u4E2D\u6DFB\u52A0");
     }
     const text2 = await this.runAgentChat(buildSearchPrompt(query), whitelist);
-    const json = extractJsonValue(text2);
-    if (json && typeof json === "object" && !Array.isArray(json)) {
-      const data = json;
-      if (typeof data.error === "string" && data.error.trim() !== "") {
-        throw new Error(`agent \u641C\u7D22\u5931\u8D25: ${data.error}`);
+    const mapItems = (items) => items.filter((item) => !!item && typeof item === "object").map(mapJsonToRequirement);
+    const bestArray = extractBestJsonArray(text2);
+    let bestItems;
+    let errorObj;
+    for (const c of extractJsonCandidates(text2)) {
+      if (!c.value || typeof c.value !== "object" || Array.isArray(c.value)) continue;
+      const obj = c.value;
+      if (typeof obj.error === "string" && obj.error.trim() !== "") {
+        if (!errorObj || c.index >= errorObj.index) errorObj = { error: obj.error, index: c.index };
       }
-      return [];
+      if (Array.isArray(obj.items)) {
+        if (!bestItems || c.index >= bestItems.index) bestItems = { items: obj.items, index: c.index };
+      }
     }
-    if (Array.isArray(json)) {
-      return json.filter((item) => !!item && typeof item === "object").map(mapJsonToRequirement);
+    const arrIdx = bestArray ? bestArray.index : -1;
+    if (errorObj && errorObj.index > arrIdx && (bestItems === void 0 || errorObj.index > bestItems.index)) {
+      throw new Error(`agent \u641C\u7D22\u5931\u8D25: ${errorObj.error}`);
     }
-    throw new Error("agent \u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\u4E3A JSON \u6570\u7EC4\u5951\u7EA6");
+    if (bestItems && (bestArray === void 0 || bestItems.index >= bestArray.index)) {
+      return mapItems(bestItems.items);
+    }
+    if (bestArray) return mapItems(bestArray.value);
+    throw new Error(`agent \u8F93\u51FA\u65E0\u6CD5\u89E3\u6790\u4E3A JSON \u6570\u7EC4\u5951\u7EA6\uFF08\u8F93\u51FA\u7ED3\u5C3E\uFF1A\u2026${text2.slice(-300)}\uFF09`);
   }
 };
 

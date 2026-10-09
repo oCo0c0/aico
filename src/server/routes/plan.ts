@@ -38,7 +38,7 @@ import {LruCache} from '../utils/lru-cache.js';
 import {processToolOutput} from '../utils/tool-log.js';
 import {extractJsonArray, extractJsonObject} from '../utils/structured-json.js';
 import {validateShape, type FieldSpec, type ValidationResult} from '../utils/json-validator.js';
-import {runBridgeJson} from '../utils/bridge-json-runner.js';
+import {runBridgeJson, withOutputTimeout} from '../utils/bridge-json-runner.js';
 
 /**
  * @type {PersistedPlan}
@@ -47,7 +47,7 @@ import {runBridgeJson} from '../utils/bridge-json-runner.js';
  */
 export type StoredPlan = PersistedPlan;
 
-/** Bridge 调用超时时间（30 分钟） */
+/** Bridge 无输出容忍时长（活动看门狗：有输出即重置，仅真正沉寂时中止） */
 const BRIDGE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** 任务导出 JSON 单行结构（技能输出） */
@@ -675,26 +675,29 @@ async function runBridgeWithTimeout(
     };
 
     try {
-        const result = await Promise.race([
-            bridgeOptions.cliRunner.runBridge(
-                {
-                    prompt: bridgeOptions.prompt,
-                    cwd: bridgeOptions.cwd,
-                    sessionId: bridgeOptions.sessionId,
-                    maxTurns: 20,
-                    skills: bridgeOptions.skills,
-                    mcpServers: bridgeOptions.mcpServers,
-                },
-                {
-                    workspacePath: bridgeOptions.cwd,
-                    signal: bridgeOptions.signal,
-                    onOutput,
-                }
-            ),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`${errorPrefix} timed out after 30 minutes`)), BRIDGE_TIMEOUT_MS)
-            ),
-        ]);
+        // 活动看门狗：有输出即重置，只有真正沉寂满 30 分钟（疑似卡死）才中止
+        const result = await withOutputTimeout(
+            BRIDGE_TIMEOUT_MS,
+            errorPrefix,
+            bridgeOptions.signal,
+            onOutput,
+            (signal, wrappedOnOutput) =>
+                bridgeOptions.cliRunner.runBridge(
+                    {
+                        prompt: bridgeOptions.prompt,
+                        cwd: bridgeOptions.cwd,
+                        sessionId: bridgeOptions.sessionId,
+                        maxTurns: 20,
+                        skills: bridgeOptions.skills,
+                        mcpServers: bridgeOptions.mcpServers,
+                    },
+                    {
+                        workspacePath: bridgeOptions.cwd,
+                        signal,
+                        onOutput: (data, meta) => wrappedOnOutput(data, meta),
+                    }
+                ),
+        );
 
         finalizePlan(plan, result, accumulatedOutput, planStore);
     } catch (err) {
@@ -780,31 +783,35 @@ async function runNextPlanSkill(
     const accumulated = plan.rawOutput ?? '';
 
     try {
-        const result = await Promise.race([
-            cliRunner.runBridge(
-                {
-                    prompt,
-                    cwd,
-                    sessionId: plan.sessionId,
-                    maxTurns: 20,
-                    skills: [skill],
-                    mcpServers,
-                },
-                {
-                    workspacePath: cwd,
-                    signal,
-                    onOutput: (data: string) => {
-                        plan.rawOutput = (plan.rawOutput ?? '') + data;
-                        plan.summary = (plan.rawOutput ?? '').substring(0, 500);
-                        planCache.set(plan.id, {...plan});
-                        broadcast({type: 'plan:progress', data: {taskId: plan.id, content: data}});
+        // 活动看门狗：有输出即重置，只有真正沉寂满 30 分钟（疑似卡死）才中止
+        const result = await withOutputTimeout(
+            BRIDGE_TIMEOUT_MS,
+            `计划技能 "${skill}"`,
+            signal,
+            undefined,
+            (innerSignal, onOutput) =>
+                cliRunner.runBridge(
+                    {
+                        prompt,
+                        cwd,
+                        sessionId: plan.sessionId,
+                        maxTurns: 20,
+                        skills: [skill],
+                        mcpServers,
                     },
-                }
-            ),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error(`Plan skill "${skill}" timed out after 30 minutes`)), BRIDGE_TIMEOUT_MS)
-            ),
-        ]);
+                    {
+                        workspacePath: cwd,
+                        signal: innerSignal,
+                        onOutput: (data: string) => {
+                            onOutput(data);
+                            plan.rawOutput = (plan.rawOutput ?? '') + data;
+                            plan.summary = (plan.rawOutput ?? '').substring(0, 500);
+                            planCache.set(plan.id, {...plan});
+                            broadcast({type: 'plan:progress', data: {taskId: plan.id, content: data}});
+                        },
+                    }
+                ),
+        );
 
         if (result.sessionId) plan.sessionId = result.sessionId;
 

@@ -200,6 +200,11 @@ export function useWebSocket() {
                         window.dispatchEvent(new CustomEvent('requirement:updated', {detail: message.data}));
                         break;
 
+                    // 需求拉取过程（agent 工具调用/思考/重试），分发给需求页活动面板实时渲染
+                    case 'requirement:fetch_progress':
+                        window.dispatchEvent(new CustomEvent('requirement:fetch-progress', {detail: message.data}));
+                        break;
+
                     // Agent决策过程：展示Think-Act-Observe-Reflect循环
                     case 'agent:progress':
                         const {

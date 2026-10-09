@@ -669,8 +669,34 @@ export class PiProvider implements CLIProvider {
             resolveCompletion();
         };
 
+        // 整轮看门狗——「无活动」语义：任何事件（文本/思考/工具/轮次）都会重置计时，
+        // 只有事件流彻底沉寂满 30 分钟（疑似卡死）才强制中止。
+        // 旧实现是启动时设定一次的绝对定时器：健康长任务（持续产出）也会在 30 分钟整被无脑杀掉。
+        const armRunWatchdog = () => {
+            if (runWatchdog) clearTimeout(runWatchdog);
+            runWatchdog = setTimeout(() => {
+                options?.onOutput?.('\n[pi 已 30 分钟无任何事件（疑似卡死），已强制中止本次运行]\n');
+                procRef?.send({type: 'abort'}).catch(() => undefined);
+                finish();
+            }, RUN_WATCHDOG_MS);
+            runWatchdog.unref?.();
+        };
+
+        // 工具级看门狗——同样「无活动」：tool_execution_update（部分输出到达）会重置，
+        // 只在工具长时间零输出（疑似挂死）时中止本次运行。
+        const armToolWatchdog = (toolCallId: string, toolName: string) => {
+            const timer = setTimeout(() => {
+                options?.onOutput?.(`\n[工具 ${toolName} 已 10 分钟无输出（疑似挂死），已强制中止本次运行]\n`);
+                procRef?.send({type: 'abort'}).catch(() => undefined);
+                finish();
+            }, TOOL_WATCHDOG_MS);
+            timer.unref?.();
+            if (toolCallId) toolWatchdogs.set(toolCallId, timer);
+        };
+
         // 当前 run 绑定的事件处理（process-per-run：进程事件即本 run 事件）
         const handleEvent = (evt: Record<string, any>) => {
+            armRunWatchdog(); // 任何事件都算进展：重置整轮看门狗
             switch (evt.type) {
                 case 'message_update': {
                     const msgEvent = evt.assistantMessageEvent as Record<string, any> | undefined;
@@ -694,12 +720,9 @@ export class PiProvider implements CLIProvider {
 
                 case 'tool_execution_start': {
                     const toolCallId = String(evt.toolCallId ?? '');
-                    const timer = setTimeout(() => {
-                        options?.onOutput?.(`\n[工具 ${evt.toolName} 执行超过 10 分钟未返回，已强制中止本次运行]\n`);
-                        procRef?.send({type: 'abort'}).catch(() => undefined);
-                        finish();
-                    }, TOOL_WATCHDOG_MS);
-                    if (toolCallId) toolWatchdogs.set(toolCallId, timer);
+                    // 工具级看门狗：工具开始执行后 10 分钟内零输出（部分输出会重置，见
+                    // tool_execution_update）才判定疑似挂死并中止——长工具（大构建/长查询）不误伤
+                    armToolWatchdog(toolCallId, String(evt.toolName ?? 'Tool'));
                     flushThinking();
                     flushBuffer();
                     options?.onOutput?.('', {
@@ -711,9 +734,17 @@ export class PiProvider implements CLIProvider {
                     break;
                 }
 
-                case 'tool_execution_update':
+                case 'tool_execution_update': {
                     toolBuf += extractToolText(evt.partialResult);
+                    // 工具仍在产出（部分输出到达）→ 重置该工具的看门狗（「无活动」语义）
+                    const updatingId = String(evt.toolCallId ?? '');
+                    if (updatingId && toolWatchdogs.has(updatingId)) {
+                        const stale = toolWatchdogs.get(updatingId);
+                        if (stale) clearTimeout(stale);
+                        armToolWatchdog(updatingId, String(evt.toolName ?? 'Tool'));
+                    }
                     break;
+                }
 
                 case 'tool_execution_end': {
                     const endedId = String(evt.toolCallId ?? '');
@@ -816,13 +847,8 @@ export class PiProvider implements CLIProvider {
                 setTimeout(finish, ABORT_GRACE_MS).unref?.();
             }, {once: true});
 
-            // 整轮看门狗
-            runWatchdog = setTimeout(() => {
-                options?.onOutput?.('\n[pi 运行超过 30 分钟无进展，已强制中止]\n');
-                proc.send({type: 'abort'}).catch(() => undefined);
-                finish();
-            }, RUN_WATCHDOG_MS);
-            runWatchdog.unref?.();
+            // 整轮看门狗：首臂（此后任何事件都会重置，见 armRunWatchdog）
+            armRunWatchdog();
 
             // 发送 prompt：应答 success 即预检通过（preflight），完成由 agent_end 驱动
             await proc.send({type: 'prompt', message: input.prompt});
