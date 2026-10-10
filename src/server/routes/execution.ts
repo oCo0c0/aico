@@ -587,17 +587,22 @@ export function createExecutionRoutes(
 
     /**
      * GET /api/execution/:id/status
-     * @description 获取执行任务的详细状态和完整日志。
+     * @description 获取执行任务的详细状态和日志。
      *              优先从内存中读取（活跃执行的最新状态），未命中时回退到持久化存储。
      * @param {string} id.path - 执行任务ID
-     * @returns {Object} 执行状态详情，包含日志数组
+     * @param {number} id.query.logsFrom - 可选，从第 N 条开始返回（0 起，默认尾部 200 条，兼容旧客户端）
+     * @returns {Object} 执行状态详情，包含日志数组（logsFrom 时可能为全量分段）
      */
     router.get('/:id/status', (req, res) => {
+        // 分段读取起点：logsFrom=N 从第 N 条起全量返回（首次加载传 0 拿全量，轮询不传走尾部窗口）
+        const logsFromRaw = Number(req.query.logsFrom);
+        const logsFrom = Number.isFinite(logsFromRaw) && logsFromRaw >= 0 ? Math.floor(logsFromRaw) : null;
+
         // 优先检查内存中的活跃执行（状态更实时）
         const active = executionStore.get(req.params.id);
         if (active) {
-            // 只返回最近 200 条日志，避免数据量过大
-            const recentLogs = active.logs.slice(-200);
+            const all = active.logs;
+            const recentLogs = logsFrom !== null ? all.slice(logsFrom) : all.slice(-200);
             res.json({
                 id: active.id,
                 planId: active.planId,
@@ -607,7 +612,7 @@ export function createExecutionRoutes(
                 startedAt: active.startedAt,
                 completedAt: active.completedAt,
                 logs: recentLogs,
-                totalLogs: active.logs.length, // 添加总日志数供前端参考
+                totalLogs: all.length, // 总日志数供前端参考
             });
             return;
         }
@@ -618,12 +623,12 @@ export function createExecutionRoutes(
             res.status(404).json({code: 'NOT_FOUND', message: 'Execution not found'});
             return;
         }
-        // 持久化数据同样限制返回数量
-        const recentLogs = (persisted.logs || []).slice(-200);
+        const all = persisted.logs || [];
+        const recentLogs = logsFrom !== null ? all.slice(logsFrom) : all.slice(-200);
         res.json({
             ...persisted,
             logs: recentLogs,
-            totalLogs: (persisted.logs || []).length,
+            totalLogs: all.length,
         });
     });
 

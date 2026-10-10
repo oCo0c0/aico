@@ -8,13 +8,13 @@
  */
 
 import {memo, useState} from 'react';
-import {type LucideIcon, User, Brain, Wrench, Terminal, XCircle, AlertTriangle, Copy, Check, Layers, Clock, ChevronDown} from 'lucide-react';
+import {type LucideIcon, User, Brain, Wrench, Terminal, XCircle, AlertTriangle, Copy, Check, Layers, Clock, ChevronDown, MessageSquareQuote} from 'lucide-react';
 import {cn} from '../lib/utils';
 import {MarkdownContent} from './MarkdownContent';
 import {ToolEventRow, type ToolEventInfo} from './ToolEventRow';
 
 /** 统一日志消息类型 */
-export type LogKind = 'user' | 'thinking' | 'tool' | 'tool_use' | 'tool_result' | 'output' | 'error' | 'warning';
+export type LogKind = 'user' | 'assistant' | 'thinking' | 'tool' | 'tool_use' | 'tool_result' | 'output' | 'error' | 'warning';
 
 /** 统一日志消息数据 */
 export interface LogMessageData {
@@ -43,6 +43,14 @@ const KIND_META: Record<LogKind, KindMeta> = {
         dot: 'bg-blue-500',
         badge: 'bg-blue-500/15 text-blue-600 dark:text-blue-400',
         bubble: 'bg-gradient-to-br from-blue-500/15 to-blue-600/5 border-blue-500/25',
+    },
+    // 最终答复：执行终态由服务端把最后一段叙述提升为显式答复行（刷新后仍可见）
+    assistant: {
+        label: '答复',
+        icon: MessageSquareQuote,
+        dot: 'bg-emerald-500',
+        badge: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+        bubble: 'bg-gradient-to-br from-emerald-500/15 to-emerald-600/5 border-emerald-500/25',
     },
     thinking: {
         label: '思考',
@@ -117,6 +125,8 @@ export const LogMessage = memo(function LogMessage({message}: LogMessageProps) {
     const meta = KIND_META[message.kind] ?? KIND_META.output;
     const Icon = meta.icon;
     const isUser = message.kind === 'user';
+    // 最终答复：左侧竖条强调（同 user 消息机制，绿色系），让汇总在流里一眼可辨
+    const isAssistant = message.kind === 'assistant';
     const [copied, setCopied] = useState(false);
 
     const handleCopy = async () => {
@@ -136,8 +146,9 @@ export const LogMessage = memo(function LogMessage({message}: LogMessageProps) {
                 'animate-in fade-in slide-in-from-bottom-1 duration-200',
                 meta.bubble
             )}>
-                {/* 用户消息左侧竖条装饰 */}
+                {/* 用户/最终答复消息左侧竖条装饰 */}
                 {isUser && <span className="absolute left-0 top-2 bottom-2 w-[3px] rounded-full bg-blue-500/70"/>}
+                {isAssistant && <span className="absolute left-0 top-2 bottom-2 w-[3px] rounded-full bg-emerald-500/70"/>}
 
                 {/* 头部：类型徽标 + 时间戳/步骤 + 复制 */}
                 <div className="flex items-center gap-2 mb-1">

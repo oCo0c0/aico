@@ -106,7 +106,8 @@ const SUBTASK_DECOMPOSE_SPEC: Record<string, FieldSpec> = {
     },
 };
 
-export class AgentCoordinator {    private store = AgentExecutionStore.getInstance();
+export class AgentCoordinator {
+    private store = AgentExecutionStore.getInstance();
     private abortControllers = new Map<string, AbortController>();
     /** 每个执行已「允许并记住」的工具名白名单（executionId → toolNames） */
     private allowedTools = new Map<string, Set<string>>();
@@ -122,6 +123,15 @@ export class AgentCoordinator {    private store = AgentExecutionStore.getInstan
      * 前端工具行会永远停在「运行中」转圈 —— 轮末补一条结果把它收到终态。
      */
     private pendingToolCalls = new Map<string, Set<string>>();
+    /**
+     * 「最终答复」追踪（executionId → 本轮最近一次正文/thinking 输出）。
+     * makeOutputHandler 持续覆盖，执行终态时由 appendFinalAssistantLog 消费并清除。
+     * 背景：模型的最终答复可能走 text 通道（常规），也可能走 thinking 通道
+     * （思考模型偶发把汇总说在 reasoning 里，正文通道为空）——刷新/切页后
+     * 执行日志里只剩一条收起的 Think 行，用户以为汇总丢了。取两者中更晚出现者
+     * 写成 {type:'assistant'} 行，让「最终答复」成为消息流里的显式形态。
+     */
+    private lastOutputs = new Map<string, { plain: string; thinking: string; seq: number; plainSeq: number; thinkingSeq: number }>();
     /**
      * 正在运行的执行（单个执行同时只允许一个 execute 循环）。
      * 重复 start / 客户端重放 / 中断续跑重入会把同一执行跑成多个并发循环：
@@ -327,8 +337,16 @@ export class AgentCoordinator {    private store = AgentExecutionStore.getInstan
                     console.error(`[coordinator] addLog failed for ${executionId}:`, err);
                 });
         };
+        // 最终答复追踪：同一执行的多次 runBridge（多轮对话/子任务）各自覆盖，
+        // 终态时只保留最后一轮的输出（appendFinalAssistantLog 消费后清除）
+        const track = {plain: '', thinking: '', seq: 0, plainSeq: 0, thinkingSeq: 0};
+        this.lastOutputs.set(executionId, track);
         return (data: string, meta?: Record<string, unknown>) => {
             if (data && meta?.type !== 'tool_result' && meta?.type !== 'thinking') {
+                // 最终答复候选：正文通道（text delta 流）
+                track.seq++;
+                track.plain = data;
+                track.plainSeq = track.seq;
                 // Store 写成功后再广播，保证前端收到日志时数据已持久化
                 this.store.addLog(executionId, data)
                     .then(() => this.broadcastLog(executionId, data))
@@ -342,7 +360,12 @@ export class AgentCoordinator {    private store = AgentExecutionStore.getInstan
 
             switch (meta.type) {
                 case 'thinking': {
-                    const content = data.length > 2000 ? `${data.slice(0, 2000)}…` : data;
+                    // 8000：思考模型可能把最终汇总说在 reasoning 里（正文通道为空），
+                    // 截断太狠会让唯一的答复在刷新后不可读；行级截断仍防长思考刷爆日志
+                    const content = data.length > 8000 ? `${data.slice(0, 8000)}…` : data;
+                    track.seq++;
+                    track.thinking = data;
+                    track.thinkingSeq = track.seq;
                     appendStructured({type: 'thinking', content});
                     this.handleThinking(executionId, data).catch(err => {
                         console.error(`[coordinator] handleThinking failed:`, err);
@@ -387,6 +410,33 @@ export class AgentCoordinator {    private store = AgentExecutionStore.getInstan
                 }
             }
         };
+    }
+
+    /**
+     * 从最终输出追踪中提取「最终答复」，写成显式 {type:'assistant'} 日志行。
+     *
+     * 背景：模型的汇总/答复走 text 或 thinking 通道，两种形态在刷新/切页后
+     * 都不再以「输出/答复」的显式姿态出现在消息流里（thinking 行折叠、正文行
+     * 可能混在工具行之间）——用户以为汇总丢了。此方法在执行终态把最后出现的
+     * 叙述内容（正文段与思考段中更晚者）提升为 assistant 行，前端渲染为
+     * 独立的「答复」消息，持久化后刷新也可见。
+     */
+    private async appendFinalAssistantLog(executionId: string): Promise<void> {
+        const track = this.lastOutputs.get(executionId);
+        if (!track) return;
+        this.lastOutputs.delete(executionId);
+        // 取正文段与思考段中更晚出现者（pi 的 flush 顺序是 thinking 先、正文后）
+        const finalText = track.plainSeq >= track.thinkingSeq ? track.plain : track.thinking;
+        const text = finalText.trim();
+        if (!text) return;
+        const content = text.length > 16000 ? `${text.slice(0, 16000)}…` : text;
+        const line = JSON.stringify({type: 'assistant', content});
+        try {
+            await this.store.addLog(executionId, line);
+            this.broadcastLog(executionId, line);
+        } catch (err) {
+            console.error(`[coordinator] appendFinalAssistantLog failed for ${executionId}:`, err);
+        }
     }
 
     /**
@@ -622,6 +672,8 @@ export class AgentCoordinator {    private store = AgentExecutionStore.getInstan
 
         // 终态
         await this.finalizeSteps(executionId, overall);
+        // 最终答复显性化（failed 不写：错误信息已由 error 行表达）
+        if (overall !== 'failed') await this.appendFinalAssistantLog(executionId);
         await this.store.updateStatus(executionId, overall);
         this.broadcastStatus(executionId, overall);
         this.broadcastComplete(executionId, overall);
@@ -785,12 +837,16 @@ export class AgentCoordinator {    private store = AgentExecutionStore.getInstan
 
         if (result.aborted) {
             await this.finalizeSteps(executionId, 'aborted');
+            // 中断前若已产出叙述内容（正文/思考），同样提升为答复行保留
+            await this.appendFinalAssistantLog(executionId);
             await this.store.updateStatus(executionId, 'aborted');
             this.broadcastStatus(executionId, 'aborted');
             this.broadcastComplete(executionId, 'aborted');
             return 'aborted';
         } else if (result.exitCode === 0) {
             await this.finalizeSteps(executionId, 'completed');
+            // 最终答复显性化：把最后一段叙述（正文/思考中更晚者）写成 assistant 行
+            await this.appendFinalAssistantLog(executionId);
             await this.store.updateStatus(executionId, 'completed');
             this.broadcastStatus(executionId, 'completed');
             this.broadcastComplete(executionId, 'completed');

@@ -4,8 +4,9 @@
  *
  *   展示逻辑：
  *     1. 所有消息按时间顺序渲染，不做分区隔离
- *     2. 连续的 output 消息按 15 条一组折叠展示（最新组始终展开）
- *     3. user / error / warning 始终可见，内联渲染
+ *     2. 连续的 output 消息按 15 条一组折叠展示（最新组始终展开；工具栏可「展开全部输出」）
+ *     3. user / assistant / error / warning 始终可见，内联渲染（assistant = 最终答复，
+ *        服务端在执行终态写入，刷新后仍以「答复」形态存在）
  *     4. thinking 渲染为 Think 折叠行、tool 渲染为分类工具行（图标/摘要/可展开 IN-OUT，
  *        对齐 DeepSeek Harness 的消息流设计）；未配对的旧 tool_use / tool_result 行不展示
  *
@@ -211,6 +212,8 @@ export function LogViewer({
 
     // 输出组的展开/折叠状态（最新一组始终展开）
     const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
+    /** 用户手动「全部展开」后：新组出现时保留既有展开（不再自动收起旧组） */
+    const expandAllRef = useRef(false);
     const outputGroupIndices = useMemo(() => {
         const indices: number[] = [];
         segments.forEach((seg, si) => {
@@ -223,6 +226,13 @@ export function LogViewer({
         if (outputGroupIndices.length === 0) return;
         const last = outputGroupIndices[outputGroupIndices.length - 1];
         setExpandedGroups((prev) => {
+            // 手动全开后：只追加展开新组，历史组保持不动（流式期间不再反复折叠）
+            if (expandAllRef.current) {
+                if (prev.has(last)) return prev;
+                const next = new Set(prev);
+                next.add(last);
+                return next;
+            }
             // 最新组始终展开；新组出现时旧组自动收起 —— 只增不收会让流式输出期间
             // 全部组保持展开，高度失控 + 全量 Markdown 重渲染，拖垮滚动
             if (prev.size === 1 && prev.has(last)) return prev;
@@ -237,6 +247,16 @@ export function LogViewer({
             else next.add(segIdx);
             return next;
         });
+    };
+
+    /** 全部展开 / 恢复只展开最新组（工具栏按钮；切换后流式行为随 expandAllRef 走） */
+    const toggleExpandAll = () => {
+        expandAllRef.current = !expandAllRef.current;
+        if (expandAllRef.current) {
+            setExpandedGroups(new Set(outputGroupIndices));
+        } else if (outputGroupIndices.length > 0) {
+            setExpandedGroups(new Set([outputGroupIndices[outputGroupIndices.length - 1]]));
+        }
     };
 
     // ── 复制全部 ──
@@ -274,6 +294,16 @@ export function LogViewer({
                 )}
                 <span className="text-[10px] text-muted-foreground">{messages.length} 条</span>
                 <div className="ml-auto flex items-center gap-1">
+                    {outputGroupIndices.length > 0 && (
+                        <button onClick={toggleExpandAll}
+                                className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                                title={expandAllRef.current ? '恢复只展开最新输出组' : '展开全部输出组（历史叙述可能被工具行切碎成多组）'}>
+                            {expandAllRef.current
+                                ? <ChevronUp className="h-3 w-3"/>
+                                : <ChevronDown className="h-3 w-3"/>}
+                            {expandAllRef.current ? '收起输出' : '展开全部输出'}
+                        </button>
+                    )}
                     <button onClick={handleCopyAll}
                             className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground transition-colors">
                         {copiedAll ? <Check className="h-3 w-3 text-emerald-500"/> : <Copy className="h-3 w-3"/>}

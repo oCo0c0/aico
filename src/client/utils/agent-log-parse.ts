@@ -4,6 +4,7 @@
  *
  * 日志行格式（与后端 agent-coordinator / utils/tool-log.ts 写入格式一致）：
  * - {type:'user'|'error'|'warning', content}
+ * - {type:'assistant', content}                         → 最终答复（显式答复行）
  * - {type:'thinking', content}                          → Think 折叠行
  * - {type:'tool_use', toolName, toolUseId, toolInput}   → 与配对的 tool_result 合并为分类工具行
  * - {type:'tool_result', toolUseId, isError, content}
@@ -27,7 +28,7 @@ export interface LogLineInput {
 
 /** 单行解析结果：结构化工具事件附带配对元数据 */
 interface ParsedLine {
-    kind: 'user' | 'thinking' | 'tool_use' | 'tool_result' | 'error' | 'warning' | 'output';
+    kind: 'user' | 'assistant' | 'thinking' | 'tool_use' | 'tool_result' | 'error' | 'warning' | 'output';
     content: string;
     toolName?: string;
     toolInput?: string;
@@ -47,6 +48,9 @@ function parseLine(content: string): ParsedLine {
         switch (parsed.type) {
             case 'user':
                 return {kind: 'user', content: str(parsed.content) || content};
+            case 'assistant':
+                // 最终答复：执行终态由服务端把最后一段叙述（正文/思考）提升为显式答复行
+                return {kind: 'assistant', content: str(parsed.content) || ''};
             case 'thinking':
                 return {kind: 'thinking', content: str(parsed.content) || ''};
             case 'tool_use':

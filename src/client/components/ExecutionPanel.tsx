@@ -159,6 +159,19 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
         setDetail(d);
         onExecutionChangeRef.current?.(d);
     }, []);
+
+    /**
+     * 用 /status 响应更新 detail：与已知全量（fullLogsRef）拼接后再落 state，
+     * 避免一次性刷新点（retry/skill 轮询等）用服务端尾部窗口覆盖本地全量历史
+     */
+    const applyDetail = useCallback((data: ExecutionDetail) => {
+        const known = fullLogsRef.current;
+        const incoming = data.logs ?? [];
+        const merged = (!known || data.totalLogs < known.length) ? incoming : [...known, ...incoming];
+        fullLogsRef.current = merged;
+        data.logs = merged;
+        updateDetail(data);
+    }, [updateDetail]);
     const [replying, setReplying] = useState(false);
     const [skillConfirm, setSkillConfirm] = useState<{
         open: boolean;
@@ -167,6 +180,9 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
     }>({open: false});
     // DOM 引用：用于轮询清理
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 当前执行的已知全量日志（增量累积）：首次加载 logsFrom=0 拿全量，
+    // 之后轮询从已知长度继续拉新增段拼接——修复「刷新后只剩服务端尾部 200 条」的截断
+    const fullLogsRef = useRef<string[] | null>(null);
     // 本次任务期间是否见到过运行中状态（ref 跨 effect 重建保持，局部变量会因依赖抖动被重置）
     const sawRunningRef = useRef(false);
     const [pollKey, setPollKey] = useState(0); // 递增以重启轮询
@@ -259,13 +275,14 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
      */
     const loadDetail = useCallback(async (id: string) => {
         try {
-            const data = await apiGet<ExecutionDetail>(`/execution/${id}/status`);
-            updateDetail(data);
+            fullLogsRef.current = null; // 切换执行：重新全量加载
+            const data = await apiGet<ExecutionDetail>(`/execution/${id}/status?logsFrom=0`);
+            applyDetail(data);
             setActiveId(id);
         } catch {
             // 忽略加载错误
         }
-    }, []);
+    }, [applyDetail]);
 
     // 当 storeExecutionId 变化时（即从计划页面触发新执行），自动切换到该执行
     useEffect(() => {
@@ -286,12 +303,15 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
         if (!activeId) return;
 
         sawRunningRef.current = false;
+        fullLogsRef.current = null; // 轮询周期重启（切换执行）：重新全量加载
         const poll = async () => {
             try {
-                const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
-
-                // 更新本地详情状态
-                updateDetail(data);
+                // 增量拉取：首次全量（logsFrom=0），之后从已知长度只取新增段拼接全量视图；
+                // 服务端日志被重置（totalLogs 变小）时回退全量重新对齐
+                const known = fullLogsRef.current;
+                const from = known ? known.length : 0;
+                const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status?logsFrom=${from}`);
+                applyDetail(data);
 
                 if (data.status === 'running') sawRunningRef.current = true;
 
@@ -339,7 +359,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
         return () => {
             if (pollRef.current) clearInterval(pollRef.current);
         };
-    }, [activeId, storeExecutionId, setExecutionStatus, loadHistory, pollKey]);
+    }, [activeId, storeExecutionId, setExecutionStatus, loadHistory, pollKey, applyDetail]);
 
     // 组件卸载时确保清理轮询定时器，防止内存泄漏
     useEffect(() => {
@@ -372,7 +392,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
             await apiPost(`/execution/${activeId}/retry-step`);
             // 立即刷新状态并重启轮询
             const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
-            updateDetail(data);
+            applyDetail(data);
             setPollKey(k => k + 1);
             // 刷新历史列表以更新状态标识
             loadHistory();
@@ -389,7 +409,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
             await apiPost(`/execution/${activeId}/skip-step`);
             // 立即刷新状态并重启轮询
             const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
-            updateDetail(data);
+            applyDetail(data);
             setPollKey(k => k + 1);
             // 刷新历史列表以更新状态标识
             loadHistory();
@@ -423,7 +443,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
                 try {
                     if (!activeId) return;
                     const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
-                    updateDetail(data);
+                    applyDetail(data);
                     if (['completed', 'failed', 'aborted'].includes(data.status)) {
                         if (pollRef.current) clearInterval(pollRef.current);
                         loadHistory();
@@ -452,7 +472,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
             const res = await apiPost<{ completed?: boolean }>(`/execution/${activeId}/skip-skill`);
             if (res.completed) {
                 const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
-                updateDetail(data);
+                applyDetail(data);
                 loadHistory();
                 return;
             }
@@ -461,7 +481,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
                 try {
                     if (!activeId) return;
                     const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
-                    updateDetail(data);
+                    applyDetail(data);
                     if (['completed', 'failed', 'aborted'].includes(data.status)) {
                         if (pollRef.current) clearInterval(pollRef.current);
                         loadHistory();
