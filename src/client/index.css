@@ -445,112 +445,43 @@ html.dark body[data-wallpaper-active] {
     }
 }
 
-/* === Bongo Cat 打字猫（吉祥物）===
-   typing：左右爪交替敲击 + 身体轻微起伏 + 头顶代码符号上浮；
-   prefers-reduced-motion 时全部动画停用（静息趴伏）。 */
-.bongo-cat__paw--l {
-    transform-origin: 122px 128px;
+/* === 吉祥物（轴伊 Joi 双衣装 / 轴芯鲸鱼娘，2×2 精灵图）===
+   background-position 换格表达心情；transform 动画表达打字与敲击反馈，
+   二者互不冲突（一个改 background，一个改 transform）。 */
+.joi-pet {
+    background-repeat: no-repeat;
+    transform-origin: 50% 100%;
+    will-change: transform;
 }
 
-.bongo-cat__paw--r {
-    transform-origin: 172px 128px;
+/* 打字（agent 执行 / 用户输入流）：原地小碎步颠动 */
+.joi-pet--typing {
+    animation: joi-typing 0.36s ease-in-out infinite;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .bongo-cat--typing .bongo-cat__paw--l {
-        animation: bongo-paw-l 0.3s ease-in-out infinite;
-    }
-
-    .bongo-cat--typing .bongo-cat__paw--r {
-        animation: bongo-paw-r 0.3s ease-in-out infinite;
-    }
-
-    .bongo-cat--typing {
-        animation: bongo-bob 0.6s ease-in-out infinite;
-    }
-
-    .bongo-cat__bit {
-        opacity: 0;
-        animation: bongo-bit 1.5s ease-out infinite;
-    }
-
-    .bongo-cat__bit--2 {
-        animation-delay: 0.5s;
-    }
-
-    .bongo-cat__bit--3 {
-        animation-delay: 1s;
-    }
+@keyframes joi-typing {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    25% { transform: translateY(-4%) rotate(-2deg); }
+    75% { transform: translateY(-2%) rotate(2deg); }
 }
 
-@keyframes bongo-paw-l {
-    0%,
-    100% {
-        transform: translateY(0);
-    }
-
-    50% {
-        transform: translateY(7px);
-    }
+/* 输入镜像敲击：左/右键各挤向一侧，动画结束停在原位（class 由下次敲击摘除） */
+.joi-pet--tap-l {
+    animation: joi-tap-l 0.18s ease-out;
 }
 
-@keyframes bongo-paw-r {
-    0%,
-    100% {
-        transform: translateY(7px);
-    }
-
-    50% {
-        transform: translateY(0);
-    }
+.joi-pet--tap-r {
+    animation: joi-tap-r 0.18s ease-out;
 }
 
-@keyframes bongo-bob {
-    0%,
-    100% {
-        transform: translateY(0);
-    }
-
-    50% {
-        transform: translateY(-1.5px);
-    }
+@keyframes joi-tap-l {
+    40% { transform: translateX(-6%) rotate(-5deg) scale(0.96, 1.04); }
+    100% { transform: translateX(0) rotate(0deg) scale(1); }
 }
 
-@keyframes bongo-bit {
-    0% {
-        opacity: 0;
-        transform: translateY(6px);
-    }
-
-    25% {
-        opacity: 0.9;
-    }
-
-    100% {
-        opacity: 0;
-        transform: translateY(-14px);
-    }
-}
-
-/* 用户输入镜像的单次敲击（paw-tap.ts 摘/挂类重触发；置于 typing 循环规则之后，
-   同特异性下后者覆盖 —— 敲击瞬间盖过循环动画，结束后自动恢复） */
-.bongo-cat__paw--l.paw-tap,
-.bongo-cat__paw--r.paw-tap {
-    animation: bongo-paw-tap 0.14s ease-out;
-}
-
-@keyframes bongo-paw-tap {
-    0% {
-        transform: translateY(0);
-    }
-
-    45% {
-        transform: translateY(7px);
-    }
-
-    100% {
-        transform: translateY(0);
-    }
+@keyframes joi-tap-r {
+    40% { transform: translateX(6%) rotate(5deg) scale(0.96, 1.04); }
+    100% { transform: translateX(0) rotate(0deg) scale(1); }
 }
 
 /* === 桌面宠物悬浮窗（Electron 透明小窗，?pet=1 分支）===

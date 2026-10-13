@@ -899,10 +899,10 @@ const MASCOT_KEY = 'ai-workbench-mascot';
 /** 快捷面板页签 localStorage key */
 const QS_TAB_KEY = 'ai-workbench-qs-tab';
 
-/** 宠物形象（自绘 SVG 三选一） */
-export type PetForm = 'kitty' | 'shiba' | 'penguin';
+/** 宠物形象（轴伊 Joi 双衣装 + 轴芯鲸鱼娘，素材见 components/mascot/pets.tsx 与 public/mascot/） */
+export type PetForm = 'joi-flowers' | 'joi-library' | 'zhouxin';
 
-const PET_FORMS: PetForm[] = ['kitty', 'shiba', 'penguin'];
+const PET_FORMS: PetForm[] = ['joi-flowers', 'joi-library', 'zhouxin'];
 
 /** 吉祥物设置 */
 export interface MascotSettings {
@@ -916,7 +916,7 @@ export interface MascotSettings {
     form: PetForm;
 }
 
-const DEFAULT_MASCOT: MascotSettings = {enabled: true, size: 1, bubble: true, form: 'kitty'};
+const DEFAULT_MASCOT: MascotSettings = {enabled: true, size: 1, bubble: true, form: 'joi-flowers'};
 
 /** 悬浮快捷面板页签（六页签，对齐 dsh-wallpaper-engine 的分区） */
 export type QuickSettingsTab = 'wallpaper' | 'appearance' | 'font' | 'mascot' | 'effects' | 'advanced';
@@ -1581,7 +1581,7 @@ function applyPreferencePatch(patch: Record<string, unknown>): void {
             enabled: m.enabled !== false,
             size: typeof m.size === 'number' && m.size >= 0.5 && m.size <= 2.5 ? m.size : 1,
             bubble: m.bubble !== false,
-            form: m.form === 'shiba' || m.form === 'penguin' ? m.form : 'kitty',
+            form: PET_FORMS.includes(m.form) ? m.form : 'joi-flowers',
         };
     }
     if ('bgImage' in patch) {
