@@ -90,6 +90,8 @@ interface ExecutionDetail extends ExecutionSummary {
     logs: string[];
     /** Claude 会话 ID，用于标识与 Claude 的交互会话 */
     sessionId?: string;
+    /** 服务端日志总数（/status 响应），增量拼接时判断是否重载 */
+    totalLogs?: number;
 }
 
 // === 辅助函数 ===
@@ -234,7 +236,7 @@ export default function ExecutionPage() {
     const applyDetail = useCallback((data: ExecutionDetail) => {
         const known = fullLogsRef.current;
         const incoming = data.logs ?? [];
-        const merged = (!known || data.totalLogs < known.length) ? incoming : [...known, ...incoming];
+        const merged = (!known || (data.totalLogs ?? Infinity) < known.length) ? incoming : [...known, ...incoming];
         fullLogsRef.current = merged;
         data.logs = merged;
         setDetail(data);

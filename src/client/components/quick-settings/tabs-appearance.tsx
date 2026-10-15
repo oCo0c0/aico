@@ -513,6 +513,17 @@ export function MascotTab() {
                         label={t('settings.mascot.bubble')}
                     />
                 </Row>
+                <Row label={t('settings.mascot.position')} hint={t('settings.mascot.positionHint')}>
+                    <button
+                        type="button"
+                        disabled={!mascot.position}
+                        onClick={() => setMascot({position: null})}
+                        className="rounded-md border border-border/60 px-2.5 py-1 text-xs text-muted-foreground transition-colors
+                            hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                    >
+                        {t('settings.mascot.resetPosition')}
+                    </button>
+                </Row>
             </div>
             <SliderRow
                 label={t('settings.mascot.size')}

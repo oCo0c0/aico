@@ -906,7 +906,7 @@ const PET_FORMS: PetForm[] = ['joi-flowers', 'joi-library', 'zhouxin'];
 
 /** 吉祥物设置 */
 export interface MascotSettings {
-    /** 是否显示（桌面端 = 宠物悬浮窗；Web = 应用内右下角组件） */
+    /** 是否显示（桌面端 = 宠物悬浮窗；Web = 应用内可拖动悬浮球） */
     enabled: boolean;
     /** 缩放 0.5-2.5 */
     size: number;
@@ -914,9 +914,21 @@ export interface MascotSettings {
     bubble: boolean;
     /** 宠物形象 */
     form: PetForm;
+    /** Web 端悬浮球位置（中心点视口百分比 0-100）；null = 默认右下角（悬在输入框上方，不挡按钮） */
+    position: {xPct: number; yPct: number} | null;
 }
 
-const DEFAULT_MASCOT: MascotSettings = {enabled: true, size: 1, bubble: true, form: 'joi-flowers'};
+const DEFAULT_MASCOT: MascotSettings = {enabled: true, size: 1, bubble: true, form: 'joi-flowers', position: null};
+
+/** 校验并收敛吉祥物悬浮位置（中心点视口百分比），非法值回落 null（默认角落） */
+function sanitizeMascotPosition(value: unknown): {xPct: number; yPct: number} | null {
+    if (!value || typeof value !== 'object') return null;
+    const p = value as {xPct?: unknown; yPct?: unknown};
+    const x = p.xPct, y = p.yPct;
+    if (typeof x !== 'number' || typeof y !== 'number') return null;
+    if (x < 0 || x > 100 || y < 0 || y > 100 || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return {xPct: x, yPct: y};
+}
 
 /** 悬浮快捷面板页签（六页签，对齐 dsh-wallpaper-engine 的分区） */
 export type QuickSettingsTab = 'wallpaper' | 'appearance' | 'font' | 'mascot' | 'effects' | 'advanced';
@@ -960,6 +972,7 @@ function loadMascotSettings(): MascotSettings {
             size,
             bubble: parsed.bubble !== false,
             form: parsed.form && PET_FORMS.includes(parsed.form) ? parsed.form : DEFAULT_MASCOT.form,
+            position: sanitizeMascotPosition(parsed.position),
         };
     } catch {
         return {...DEFAULT_MASCOT};
@@ -1582,6 +1595,7 @@ function applyPreferencePatch(patch: Record<string, unknown>): void {
             size: typeof m.size === 'number' && m.size >= 0.5 && m.size <= 2.5 ? m.size : 1,
             bubble: m.bubble !== false,
             form: PET_FORMS.includes(m.form) ? m.form : 'joi-flowers',
+            position: sanitizeMascotPosition(m.position),
         };
     }
     if ('bgImage' in patch) {
