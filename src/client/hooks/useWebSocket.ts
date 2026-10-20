@@ -382,6 +382,19 @@ export function useWebSocket() {
                         }
                         break;
 
+                    // Agent执行页 - 排队消息状态（入队/已被消费）
+                    // 消费（queued:false）在 drain 完成即广播，页面据此即时清排队条，
+                    // 不等 1.5s 轮询（此前队列变化只能靠轮询/loadDetail）
+                    case 'agent-execution:queued_update':
+                        window.dispatchEvent(new CustomEvent('agent-execution:update', {
+                            detail: {
+                                type: 'queued_update',
+                                executionId: message.data?.executionId,
+                                queued: message.data?.queued,
+                            }
+                        }));
+                        break;
+
                     // Agent执行页 - 完成通知
                     // 正常完成不打日志（状态徽章已表达）；仅中止/失败保留一条可追溯提示
                     case 'agent-execution:complete':

@@ -458,6 +458,9 @@ export default function AgentExecutionPage() {
         setProcessingNow(true);
         try {
             await apiPost(`/agent-execution/${activeId}/process-now`, {});
+            // 立即同步详情：排队条以服务端 drain 后的状态为准
+            //（drain 发生在 abort 完成后，queued_update 事件 + 轮询双兜底最终一致）
+            await loadDetail(activeId);
         } catch (err) {
             console.error('立即处理失败:', err);
         } finally {
@@ -596,6 +599,13 @@ export default function AgentExecutionPage() {
 
             if (executionId !== activeId) return;
 
+            // 排队消息已被服务端消费（drain 完成即广播）：本地队列立即清空，
+            // 排队条即时消失——不等下一次轮询（轮询异常停摆时这是唯一的清队信号）
+            if (type === 'queued_update' && data.queued === false) {
+                setDetail(prev => prev ? {...prev, pendingReplies: []} : prev);
+                return;
+            }
+
             setDetail(prev => {
                 if (!prev) return prev;
                 switch (type) {
@@ -659,11 +669,15 @@ export default function AgentExecutionPage() {
         return () => window.removeEventListener('agent-execution:update', handler);
     }, [activeId, loadHistory]);
 
-    // 轮询当前执行状态（不再被 isRunning 阻断，避免 ready→running 竞态）
+    // 轮询当前执行状态（不再被 isRunning 阻断，避免 ready→running 竞态）。
+    // 终态不再「停死」轮询：降为 10s 低频兜底，重新执行恢复 1.5s 高频——
+    // 此前终态直接 clearInterval，一旦轮询恰好落在瞬时终态窗口（如中断续跑），
+    // 页面从此拿不到新数据（排队条永久滞留的帮凶之一）
     useEffect(() => {
         if (!activeId) return;
 
         let cancelled = false;
+        let fast = true; // 当前轮询频率：running 1.5s / 非 running 10s
         sawRunningRef.current = false;
 
         const poll = async () => {
@@ -671,11 +685,22 @@ export default function AgentExecutionPage() {
                 const data = await apiGet<AgentExecutionDetail>(`/agent-execution/${activeId}/detail`);
                 if (cancelled) return;
                 setDetail(data);
-                if (data.status === 'running') sawRunningRef.current = true;
-                if (['completed', 'failed', 'aborted'].includes(data.status)) {
+                if (data.status === 'running') {
+                    sawRunningRef.current = true;
+                }
+                const wantFast = data.status === 'running';
+                if (wantFast !== fast) {
+                    fast = wantFast;
+                    if (!wantFast) {
+                        // 进入终态：刷新一次列表；通知只在「本轮见过 running」后发一次
+                        if (sawRunningRef.current) {
+                            sawRunningRef.current = false;
+                            notifyTaskResult(data.status, data.requirementTitle);
+                        }
+                        loadHistory();
+                    }
                     if (pollRef.current) clearInterval(pollRef.current);
-                    if (sawRunningRef.current) notifyTaskResult(data.status, data.requirementTitle);
-                    loadHistory();
+                    pollRef.current = setInterval(poll, fast ? 1500 : 10_000);
                 }
             } catch {
                 // 继续轮询

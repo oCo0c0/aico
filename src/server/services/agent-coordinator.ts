@@ -166,6 +166,14 @@ export class AgentCoordinator {
                 // 消费排队消息：此刻才写入对话日志（上屏时机=消费时机，
                 // 避免消息在发送瞬间插入当前轮输出导致显示顺序错乱）
                 const drained = await this.store.drainPendingReplies(executionId).catch(() => [] as string[]);
+                if (drained.length > 0) {
+                    // 队列已被消费：即时通知前端清掉排队条（不等下一次轮询。
+                    // 此前队列变化只能靠轮询，轮询被瞬时终态窗口杀掉时排队条永久滞留）
+                    broadcast({
+                        type: 'agent-execution:queued_update',
+                        data: {executionId, queued: false},
+                    });
+                }
                 for (const message of drained) {
                     this.broadcastLog(executionId, JSON.stringify({type: 'user', content: message}));
                 }
@@ -177,11 +185,10 @@ export class AgentCoordinator {
                 await this.settlePendingToolCalls(executionId, 'unsettled');
 
                 if (outcome === 'aborted' && this.interruptFlags.has(executionId)) {
-                    // 「立即处理」：不落 aborted 终态，直接续跑（新消息已入 user 日志）
+                    // 「立即处理」中断：非终态——aborted 状态未落库/未广播
+                    // （runOnce 内已跳过终态写入），新消息已在循环顶部 drain 进日志，
+                    // 直接续跑即可（runOnce 开头会重新声明 running）
                     this.interruptFlags.delete(executionId);
-                    await this.store.updateStatus(executionId, 'running');
-                    this.broadcastStatus(executionId, 'running');
-                    await this.store.addLog(executionId, '⚡ 已中断当前轮，立即处理新消息').catch(() => undefined);
                     continue;
                 }
                 if (outcome === 'completed' && this.queuedReplyFlags.has(executionId)) {
@@ -275,10 +282,13 @@ export class AgentCoordinator {
 
         // 分解过程中被中止：直接终态，避免空跑一次 bridge
         if (controller.signal.aborted) {
-            await this.finalizeSteps(executionId, 'aborted');
-            await this.store.updateStatus(executionId, 'aborted');
-            this.broadcastStatus(executionId, 'aborted');
-            this.broadcastComplete(executionId, 'aborted');
+            // 「立即处理」中断不是终态：跳过终态写入/广播，外层循环带新消息续跑
+            if (!this.interruptFlags.has(executionId)) {
+                await this.finalizeSteps(executionId, 'aborted');
+                await this.store.updateStatus(executionId, 'aborted');
+                this.broadcastStatus(executionId, 'aborted');
+                this.broadcastComplete(executionId, 'aborted');
+            }
             return 'aborted';
         }
 
@@ -302,6 +312,8 @@ export class AgentCoordinator {
 
     /**
      * 「立即处理」：中止当前轮，外层循环检测标志后自动带新消息续跑。
+     * 中断不是终态——全程保持 running，不广播 aborted/complete，
+     * 前端因此不会闪现「Agent执行已中止」。
      * @returns 是否成功触发（无运行中的控制器时返回 false）
      */
     interruptNow(executionId: string): boolean {
@@ -309,6 +321,12 @@ export class AgentCoordinator {
         if (!controller) return false;
         this.interruptFlags.add(executionId);
         this.queuedReplyFlags.add(executionId);
+        // 即时反馈：点击「立即处理」立刻有日志说明发生了什么，
+        // 而不是沉默等 abort 走完后才由续跑轮次间接体现
+        const notice = '⚡ 立即处理排队消息：正在中断当前轮…';
+        this.store.addLog(executionId, notice)
+            .then(() => this.broadcastLog(executionId, notice))
+            .catch(() => undefined);
         controller.abort();
         this.denyPendingPermissions(executionId, '已中断当前轮，立即处理新消息');
         // 中断瞬间就收敛在飞工具：被 abort 的工具不会再返回结果，
@@ -618,7 +636,8 @@ export class AgentCoordinator {
                 overall = 'aborted';
                 await this.store.updateSubTask(executionId, sub.id, {
                     status: 'failed',
-                    error: '已中止',
+                    // 「立即处理」中断不是用户放弃：文案区分开，避免历史详情里误读
+                    error: this.interruptFlags.has(executionId) ? '已中断（立即处理排队消息）' : '已中止',
                     completedAt: new Date().toISOString(),
                 }).catch(() => undefined);
                 broadcast({
@@ -674,6 +693,11 @@ export class AgentCoordinator {
         await this.finalizeSteps(executionId, overall);
         // 最终答复显性化（failed 不写：错误信息已由 error 行表达）
         if (overall !== 'failed') await this.appendFinalAssistantLog(executionId);
+        if (overall === 'aborted' && this.interruptFlags.has(executionId)) {
+            // 「立即处理」中断：非终态——不落状态/广播/「执行已中止」日志，
+            // 外层循环马上带排队消息续跑（全程保持 running）
+            return overall;
+        }
         await this.store.updateStatus(executionId, overall);
         this.broadcastStatus(executionId, overall);
         this.broadcastComplete(executionId, overall);
@@ -839,6 +863,11 @@ export class AgentCoordinator {
             await this.finalizeSteps(executionId, 'aborted');
             // 中断前若已产出叙述内容（正文/思考），同样提升为答复行保留
             await this.appendFinalAssistantLog(executionId);
+            if (this.interruptFlags.has(executionId)) {
+                // 「立即处理」中断：非终态——不落 aborted 状态/广播/complete，
+                // 外层循环马上带排队消息续跑（全程保持 running，前端不闪「已中止」）
+                return 'aborted';
+            }
             await this.store.updateStatus(executionId, 'aborted');
             this.broadcastStatus(executionId, 'aborted');
             this.broadcastComplete(executionId, 'aborted');
