@@ -49,7 +49,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Cache electron binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # key 跟随实际安装的 electron 版本（hash 其 package.json），升级依赖自动换 key
           key: electron-${{ runner.os }}-${{ hashFiles('node_modules/electron/package.json') }}
