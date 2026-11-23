@@ -66,7 +66,7 @@ jobs:
         # unix 平台先抬高文件句柄上限（macOS 默认 256，打包大量文件会 EMFILE）
         # 显式用 bash 执行：Windows runner 默认 pwsh，不识别 bash 语法；
         # retry 包装：下载 GitHub 二进制偶发触发限流，自动重试
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         env:
           GH_TOKEN: ${{ github.token }}
         with:
