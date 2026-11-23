@@ -13,6 +13,8 @@ import path from 'path';
 import type {AttachmentImageService} from './requirement-sources';
 import type {MinerUService} from './mineru-service.js';
 import {APP_DATA_DIR, REQUIREMENTS_DIR, LEGACY_IMAGE_DIR} from '../utils/constants.js';
+import {isPathWithinRoots, HttpError} from '../middleware/validation.js';
+import {writeFileAtomic} from '../utils/fs-utils.js';
 import {downloadFile as httpDownloadFile, urlToImageFilename} from '../utils/http-utils.js';
 import {parseMarker} from '../utils/parse-merge.js';
 
@@ -89,9 +91,18 @@ export class RequirementStoreService {
 
     // === 基础目录 ===
 
-    /** 需求文件夹路径 */
+    /**
+     * 需求文件夹路径（全部 id 入口的唯一收口）
+     *
+     * id 来自路由参数/请求体（外部输入），resolve 后必须仍落在 rootDir 内，
+     * 否则抛 400 —— 防止 `..%2F..` 类路径遍历读/写/删除任意目录。
+     */
     private reqDir(id: string): string {
-        return path.join(this.rootDir, id);
+        const dir = path.resolve(this.rootDir, id);
+        if (!isPathWithinRoots(dir, [this.rootDir])) {
+            throw new HttpError(400, `Invalid requirement id: ${id}`);
+        }
+        return dir;
     }
 
     /** metadata.json 路径 */
@@ -157,11 +168,12 @@ export class RequirementStoreService {
         fs.mkdirSync(dir, {recursive: true});
         fs.mkdirSync(path.join(dir, 'images'), {recursive: true});
 
-        // 写入元数据和文档
-        fs.writeFileSync(this.metadataPath(req.id), JSON.stringify(meta, null, 2), 'utf-8');
-        fs.writeFileSync(this.documentPath(req.id), description ?? '', 'utf-8');
+        // 写入元数据和文档（metadata 走原子写：写一半崩溃不留撕裂 JSON；
+        // 中途失败时最坏是「新 metadata + 旧文档」组合，下一次 upsert 自愈）
+        writeFileAtomic(this.metadataPath(req.id), JSON.stringify(meta, null, 2));
+        writeFileAtomic(this.documentPath(req.id), description ?? '');
         if (workingDescription !== undefined) {
-            fs.writeFileSync(this.workingPath(req.id), workingDescription, 'utf-8');
+            writeFileAtomic(this.workingPath(req.id), workingDescription);
         }
 
         return {...meta, description: description ?? '', workingDescription};
@@ -194,7 +206,7 @@ export class RequirementStoreService {
         };
         delete meta.workingUpdatedAt;
         // parsedAttachments 保留（只是不再合并；重新合并随时可用）
-        fs.writeFileSync(this.metadataPath(id), JSON.stringify(meta, null, 2), 'utf-8');
+        writeFileAtomic(this.metadataPath(id), JSON.stringify(meta, null, 2));
         const refreshed = this.readRequirement(id);
         return refreshed ?? this.get(id);
     }
@@ -289,8 +301,8 @@ export class RequirementStoreService {
 
         const imgDir = this.getImageDir(safeReqId);
         const filePath = path.join(imgDir, safeFilename);
-        // 路径安全检查
-        if (!filePath.startsWith(this.rootDir)) return null;
+        // 路径安全检查（resolve + 根目录边界，避免前缀字符串比较被同前缀兄弟目录绕过）
+        if (!isPathWithinRoots(filePath, [this.rootDir])) return null;
         return fs.existsSync(filePath) ? filePath : null;
     }
 

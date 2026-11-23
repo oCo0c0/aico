@@ -21,8 +21,8 @@ export function estimateTokens(text: string): number {
     if (!text) return 0;
 
     let tokens = 0;
-    let charCount = 0;
-    let wordCount = 0;
+    const charCount = 0;
+    const wordCount = 0;
 
     // 检测中文字符
     const chineseChars = text.match(/[一-龥]/g);

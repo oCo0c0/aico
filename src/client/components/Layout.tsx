@@ -10,24 +10,27 @@
  * - 全局初始化：启动 WebSocket 连接、注册键盘快捷键
  */
 
-import {useEffect, type ComponentType} from 'react';
+import {Suspense, lazy, useEffect, useState, type ComponentType} from 'react';
 import {NavLink, Navigate, useLocation} from 'react-router-dom';
 import {useTranslation} from 'react-i18next';
 import {useAppStore, syncUiPreferences} from '../stores/app-store';
 import {useKeyboardShortcuts} from '../hooks/useKeyboardShortcuts';
 import {useWebSocket} from '../hooks/useWebSocket';
 import {useResizableWidth, ResizeHandle} from '../hooks/useResizableWidth';
+import {ActivePagePathnameContext} from '../hooks/usePageActive';
 import SetupWizard from './SetupWizard';
 import {cn} from '../lib/utils';
-import RequirementsPage from '../pages/RequirementsPage';
-import WorkspacePage from '../pages/WorkspacePage';
-import PipelineRunPage from '../pages/PipelineRunPage';
-import TestsPage from '../pages/TestsPage';
-import PipelinesPage from '../pages/PipelinesPage';
-import MinerUPage from '../pages/MinerUPage';
-import ProjectsPage from '../pages/ProjectsPage';
-import AgentExecutionPage from '../pages/AgentExecutionPage';
-import SettingsPage from '../pages/SettingsPage';
+// 页面按路由级懒加载：首访才拉对应 chunk，主包不再包含全部 9 个页面
+// （此前单 JS 1.35MB）。keep-alive 语义不变——首次挂载后常驻。
+const RequirementsPage = lazy(() => import('../pages/RequirementsPage'));
+const WorkspacePage = lazy(() => import('../pages/WorkspacePage'));
+const PipelineRunPage = lazy(() => import('../pages/PipelineRunPage'));
+const TestsPage = lazy(() => import('../pages/TestsPage'));
+const PipelinesPage = lazy(() => import('../pages/PipelinesPage'));
+const MinerUPage = lazy(() => import('../pages/MinerUPage'));
+const ProjectsPage = lazy(() => import('../pages/ProjectsPage'));
+const AgentExecutionPage = lazy(() => import('../pages/AgentExecutionPage'));
+const SettingsPage = lazy(() => import('../pages/SettingsPage'));
 import {
     FileText,
     FolderOpen,
@@ -58,7 +61,7 @@ import {WindowControls} from './WindowControls';
  * 不卸载组件——切走再切回时页面保持原样（选中的需求/执行、滚动位置、输入内容都保留），
  * 运行中的任务轮询在后台继续，通知也能跨页面触发。
  */
-const KEEP_ALIVE_PAGES: Array<{key: string; match: (p: string) => boolean; component: ComponentType}> = [
+const KEEP_ALIVE_PAGES: Array<{ key: string; match: (p: string) => boolean; component: ComponentType }> = [
     {key: '/', match: (p) => p === '/', component: RequirementsPage},
     {key: '/agent-execution', match: (p) => p === '/agent-execution', component: AgentExecutionPage},
     {key: '/pipeline-run', match: (p) => p === '/pipeline-run', component: PipelineRunPage},
@@ -148,6 +151,21 @@ export default function Layout() {
 
     const location = useLocation();
 
+    // keep-alive 首访挂载：已访问过的页面 key 集合（初始含当前路由所在页）
+    const [mountedKeys, setMountedKeys] = useState<Set<string>>(
+        () => new Set(KEEP_ALIVE_PAGES.filter(({match}) => match(location.pathname)).map(({key}) => key)),
+    );
+    useEffect(() => {
+        setMountedKeys((prev) => {
+            const next = KEEP_ALIVE_PAGES.filter(({match}) => match(location.pathname)).map(({key}) => key);
+            const missing = next.filter((k) => !prev.has(k));
+            if (missing.length === 0) return prev;
+            const merged = new Set(prev);
+            missing.forEach((k) => merged.add(k));
+            return merged;
+        });
+    }, [location.pathname]);
+
     useWebSocket();
     useKeyboardShortcuts();
 
@@ -192,6 +210,7 @@ export default function Layout() {
                 setSidebarCollapsed(true);
             }
         }
+
         handleResize();
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
@@ -200,8 +219,8 @@ export default function Layout() {
     // 顶栏标题：优先精确匹配路由；/settings/:section（含未知 section）统一显示设置标题
     const currentTitle = t(
         pageTitleKeys[location.pathname]
-            ?? (location.pathname.startsWith('/settings/') ? pageTitleKeys['/settings'] : undefined)
-            ?? 'common.appTitle'
+        ?? (location.pathname.startsWith('/settings/') ? pageTitleKeys['/settings'] : undefined)
+        ?? 'common.appTitle'
     );
 
     const handleToggleLocale = () => {
@@ -284,7 +303,8 @@ export default function Layout() {
                                             <span
                                                 className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-1 rounded-r-full brand-gradient"/>
                                         )}
-                                        <Icon className={cn('h-4 w-4 flex-shrink-0 transition-colors', isActive && 'text-primary')}/>
+                                        <Icon
+                                            className={cn('h-4 w-4 flex-shrink-0 transition-colors', isActive && 'text-primary')}/>
                                         {!sidebarCollapsed && <span className="truncate">{label}</span>}
                                     </>
                                 )}
@@ -335,7 +355,8 @@ export default function Layout() {
 
             {/* 主内容区域 */}
             <div className="flex flex-1 flex-col overflow-hidden">
-                <header className="relative z-50 flex h-11 items-center justify-between border-b border-border/50 glass px-3 app-drag app-titlebar">
+                <header
+                    className="relative z-50 flex h-11 items-center justify-between border-b border-border/50 glass px-3 app-drag app-titlebar">
                     <div className="flex items-center gap-3">
                         <button
                             onClick={toggleSidebar}
@@ -361,8 +382,8 @@ export default function Layout() {
                             {cliProvider.active === 'codex'
                                 ? <Terminal className="h-4 w-4"/>
                                 : cliProvider.active === 'pi'
-                                ? <Sparkles className="h-4 w-4"/>
-                                : <Bot className="h-4 w-4"/>
+                                    ? <Sparkles className="h-4 w-4"/>
+                                    : <Bot className="h-4 w-4"/>
                             }
                             <span className="hidden sm:inline">
                                 {providerCatalog.find(p => p.id === cliProvider.active)?.label ?? cliProvider.active}
@@ -411,21 +432,37 @@ export default function Layout() {
 
                 {/* ====== 内容区：keep-alive 常驻页面，切换导航只切可见性不卸载 ======
                     各页面 wrapper 为绝对定位铺满，非活跃页 visibility:hidden 保留 DOM
-                    与滚动位置；旧路由重定向在组件树顶部处理 */}
+                    与滚动位置；旧路由重定向在组件树顶部处理。
+                    首访挂载：未访问过的页面不挂载也不拉 chunk（配合路由级 lazy，
+                    首屏只加载当前页）；访问过即常驻，keep-alive 语义不变。
+                    活跃路由经 Context 广播，供各页轮询做暂停判定。 */}
                 <div className="relative flex-1 min-h-0">
-                    {KEEP_ALIVE_PAGES.map(({key, match, component: Page}) => {
-                        const active = match(location.pathname);
-                        return (
-                            <div
-                                key={key}
-                                className="absolute inset-0 flex flex-col overflow-hidden"
-                                style={{visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none'}}
-                                aria-hidden={!active}
-                            >
-                                <Page/>
-                            </div>
-                        );
-                    })}
+                    <ActivePagePathnameContext.Provider value={location.pathname}>
+                        {KEEP_ALIVE_PAGES.map(({key, match, component: Page}) => {
+                            const active = match(location.pathname);
+                            if (!mountedKeys.has(key)) return null;
+                            return (
+                                <div
+                                    key={key}
+                                    className="absolute inset-0 flex flex-col overflow-hidden"
+                                    style={{
+                                        visibility: active ? 'visible' : 'hidden',
+                                        pointerEvents: active ? 'auto' : 'none'
+                                    }}
+                                    aria-hidden={!active}
+                                >
+                                    <Suspense fallback={
+                                        <div
+                                            className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+                                            Loading…
+                                        </div>
+                                    }>
+                                        <Page/>
+                                    </Suspense>
+                                </div>
+                            );
+                        })}
+                    </ActivePagePathnameContext.Provider>
                 </div>
             </div>
 

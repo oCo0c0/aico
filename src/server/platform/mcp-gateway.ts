@@ -80,6 +80,8 @@ export class McpGateway {
     private failedUntil = new Map<string, number>();
     /** 本网关 HTTP endpoint（attachToExpress + setEndpoint 后可用） */
     private endpoint: string | null = null;
+    /** 网关认证 key（可选；经 x-api-key 请求头传递，不拼进 URL 避免落日志/Referer） */
+    private endpointApiKey: string | undefined;
     /** 平台 REST 面端点（引擎子进程内的扩展回连主进程用） */
     private platformEndpoint: {url: string; apiKey?: string} | null = null;
     /** 平台工具目录缓存（REST 面序列化视图 + 调用分发表） */
@@ -313,10 +315,13 @@ export class McpGateway {
 
     /**
      * 设置本网关的 HTTP endpoint（attachToExpress 配套调用）
-     * @example setEndpoint('http://127.0.0.1:3777/api/mcp')
+     * @param apiKey - 可选认证 key；经 x-api-key 请求头下发给引擎（不拼进 URL，
+     *                 避免 key 落入引擎日志/Referer）
+     * @example setEndpoint('http://127.0.0.1:3777/api/mcp', 'secret')
      */
-    setEndpoint(url: string): void {
+    setEndpoint(url: string, apiKey?: string): void {
         this.endpoint = url;
+        this.endpointApiKey = apiKey;
     }
 
     /**
@@ -324,16 +329,22 @@ export class McpGateway {
      * @param servers - 可选的 server 名白名单（经 url query 过滤，
      *                  保留 pipeline 的 per-phase MCP 选择语义）
      * @description 未设置 endpoint（网关未随服务启动）时返回 undefined，
-     * 调用方回退到 stdio 直挂模式。endpoint 可携带已有的 query 参数
-     * （如 apiKey 认证），本方法按需追加 servers 过滤参数。
+     * 调用方回退到 stdio 直挂模式。认证 key 走 headers（SDK 的 http 型
+     * server 配置原生支持），servers 白名单仍走 query。
      */
-    asClaudeMcpServers(servers?: string[]): Record<string, {type: 'http'; url: string}> | undefined {
+    asClaudeMcpServers(servers?: string[]): Record<string, {type: 'http'; url: string; headers?: Record<string, string>}> | undefined {
         if (!this.endpoint) return undefined;
         let url = this.endpoint;
         if (servers && servers.length > 0) {
             url += `${url.includes('?') ? '&' : '?'}servers=${encodeURIComponent(servers.join(','))}`;
         }
-        return {[PLATFORM_MCP_SERVER_NAME]: {type: 'http', url}};
+        return {
+            [PLATFORM_MCP_SERVER_NAME]: {
+                type: 'http',
+                url,
+                ...(this.endpointApiKey ? {headers: {'x-api-key': this.endpointApiKey}} : {}),
+            },
+        };
     }
 
     /**

@@ -110,11 +110,21 @@ export async function createServer(port: number): Promise<http.Server> {
     }
 
     // 全局中间件
-    if (config.security?.corsOrigin) {
-        app.use(cors({origin: config.security.corsOrigin, credentials: true}));
-    } else {
-        app.use(cors());
-    }
+    // CORS：未配置 corsOrigin 时默认只放行本机回环来源（前端 SPA / Electron 窗口）。
+    // 此前 cors() 全来源放行 + 本地接口无强制鉴权，恶意网页可跨域调用文件/Git/执行类接口。
+    // 无 Origin 头的请求（curl、同源、Electron loadURL 首请求）不受 CORS 管控，直接放行。
+    const configuredOrigin = config.security?.corsOrigin;
+    const isLoopbackOrigin = (origin: string): boolean =>
+        /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin);
+    app.use(cors({
+        origin: configuredOrigin ?? ((origin, cb) => {
+            if (!origin || isLoopbackOrigin(origin)) return cb(null, true);
+            // 非白名单来源：不带 CORS 头（浏览器拦截响应），请求本身照常到达——
+            // 这由「可选 apiKey」与各接口的输入校验兜底
+            return cb(null, false);
+        }),
+        credentials: true,
+    }));
     app.use(express.json({limit: config.security?.maxRequestSize ?? '50mb'}));
 
     // 基础安全响应头
@@ -148,11 +158,12 @@ export async function createServer(port: number): Promise<http.Server> {
     const MCP_MOUNT_PATH = '/api/mcp';
     mcpGateway.attachToExpress(app, MCP_MOUNT_PATH);
     // endpoint 供引擎构造 HTTP 挂载 URL；0.0.0.0 监听时引擎仍走本机回环。
-    // 配置了 API Key 认证时附在 query（认证中间件支持 req.query.apiKey）。
+    // 配置了 API Key 认证时经 x-api-key 请求头下发（不拼进 URL，避免 key 落日志/Referer；
+    // 认证中间件同时支持 header 与 query，header 优先）。
     const gatewayHost = (config.server?.host ?? '127.0.0.1') === '0.0.0.0' ? '127.0.0.1' : config.server?.host ?? '127.0.0.1';
     mcpGateway.setEndpoint(
-        `http://${gatewayHost}:${port}${MCP_MOUNT_PATH}` +
-        (config.auth?.apiKey ? `?apiKey=${encodeURIComponent(config.auth.apiKey)}` : '')
+        `http://${gatewayHost}:${port}${MCP_MOUNT_PATH}`,
+        config.auth?.apiKey,
     );
     // 平台 REST 面：pi RPC 子进程内的 adw 扩展经此拉取工具目录/回传工具调用
     //（MCP 清单单一事实来源不变；受全局 apiKey 中间件保护）
@@ -337,17 +348,38 @@ export async function createServer(port: number): Promise<http.Server> {
     const host = config.server?.host ?? '127.0.0.1';
     return new Promise((resolve) => {
         server.listen(port, host, () => {
-            // graceful shutdown: 清理 Daytona 沙箱
+            // graceful shutdown: 信号处理的唯一注册点（CLI/Desktop 壳不再重复注册）
+            // 清理调度器 → CLI providers → MCP 网关 → 沙箱，然后关闭 HTTP 服务退出
+            let cleanupCalled = false;
             const cleanup = async () => {
-                await taskScheduler.dispose();
-                await cliRunnerService.dispose();
-                await mcpGateway.dispose();
-                await sandboxService.cleanup();
+                if (cleanupCalled) return;
+                cleanupCalled = true;
+                console.log('\n  Shutting down...');
+                // 兜底强退：dispose 卡死（沙箱网络悬挂等）时保证进程能退出
+                setTimeout(() => process.exit(1), 5000).unref();
+                try {
+                    await taskScheduler.dispose();
+                    await cliRunnerService.dispose();
+                    await mcpGateway.dispose();
+                    await sandboxService.cleanup();
+                } catch (err) {
+                    console.error('[shutdown] cleanup error:', err instanceof Error ? err.message : err);
+                }
                 server.close();
                 process.exit(0);
             };
             process.on('SIGINT', cleanup);
             process.on('SIGTERM', cleanup);
+
+            // Electron 桌面壳的优雅关闭握手：Windows 下主进程 kill() 是 TerminateProcess
+            // 强杀，上面的信号处理器不会运行，bridge / pi RPC / MCP servers 等孙进程会
+            // 孤儿化。主进程经 spawn 的 IPC 通道发送 'adw:shutdown'，收到后走与
+            // SIGTERM 完全相同的清理路径（dispose 调度器/CLI/网关/沙箱后退出）。
+            if (typeof process.send === 'function') {
+                process.on('message', (msg: unknown) => {
+                    if (msg === 'adw:shutdown') void cleanup();
+                });
+            }
 
             resolve(server);
         });

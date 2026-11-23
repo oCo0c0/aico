@@ -116,7 +116,7 @@ export function lightenHex(hex: string, amount: number): string {
     const c = (1 - Math.abs(2 * ln - 1)) * sn;
     const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
     const m = ln - c / 2;
-    let r = 0, g = 0, b = 0;
+    let r: number, g: number, b: number; // if/else-if 链含收尾 else，所有路径必有赋值
     if (h < 60) [r, g, b] = [c, x, 0];
     else if (h < 120) [r, g, b] = [x, c, 0];
     else if (h < 180) [r, g, b] = [0, c, x];

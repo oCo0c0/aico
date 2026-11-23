@@ -18,6 +18,9 @@ import {WorkspaceService} from '../services/workspace-service.js';
 import {validateBody, validateWorkspacePath} from '../middleware/validation.js';
 import {getErrorMessage} from '../utils/error-utils.js';
 
+/** 文件夹选择器兜底超时：交互式对话框可合法占用很久，只防进程异常挂死 */
+const PICKER_TIMEOUT_MS = 10 * 60_000;
+
 /**
  * 对标题进行安全过滤，防止跨平台的 Shell 注入攻击。
  * 仅允许字母、数字、空格、连字符、下划线以及常见中日韩（CJK）字符通过。
@@ -42,6 +45,16 @@ function openSystemFolderPicker(title: string): Promise<string | null> {
     const safe = sanitizeTitle(title);
     return new Promise((resolve) => {
         const platform = process.platform;
+        /** 收口：只认第一次调用（close/error/超时兜底三者竞速），并清理兜底定时器 */
+        let settled = false;
+        let killer: NodeJS.Timeout | null = null;
+        let pickerProcess: import('child_process').ChildProcess | null = null;
+        const finish = (value: string | null): void => {
+            if (settled) return;
+            settled = true;
+            if (killer) clearTimeout(killer);
+            resolve(value);
+        };
 
         if (platform === 'win32') {
             // Windows 平台：使用 PowerShell 调用 Shell.Application COM 对象
@@ -49,29 +62,31 @@ function openSystemFolderPicker(title: string): Promise<string | null> {
             const escaped = safe.replace(/'/g, "''");
             const script = [
                 '$shell = New-Object -ComObject Shell.Application',
-                `$folder = $shell.BrowseForFolder(0, '${escaped}', 0, 0)`,
+                "$folder = $shell.BrowseForFolder(0, '${escaped}', 0, 0)",
                 'if ($folder) { Write-Output $folder.Self.Path }',
             ].join('; ');
 
             const child = spawn('powershell', ['-NoProfile', '-Command', script], {
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
+            pickerProcess = child;
 
             let output = '';
             child.stdout.on('data', (d: Buffer) => {
                 output += d.toString();
             });
-            child.on('close', () => resolve(output.trim() || null));
-            child.on('error', () => resolve(null));
+            child.on('close', () => finish(output.trim() || null));
+            child.on('error', () => finish(null));
 
         } else if (platform === 'darwin') {
             // macOS 平台：使用 osascript 调用 AppleScript
             // 对双引号进行转义，以适配 osascript 命令
-            const escaped = safe.replace(/"/g, '\\"');
+            const escaped = safe.replace(/"/g, '"');
             const script = `choose folder with prompt "${escaped}"`;
             const child = spawn('osascript', ['-e', script], {
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
+            pickerProcess = child;
             let output = '';
             child.stdout.on('data', (d: Buffer) => {
                 output += d.toString();
@@ -80,9 +95,9 @@ function openSystemFolderPicker(title: string): Promise<string | null> {
                 // macOS 返回的路径格式为 "alias Macintosh HD:path:to:folder"，需要转换为 POSIX 路径
                 const raw = output.trim().replace(/^alias /, '');
                 const p = raw ? '/' + raw.split(':').slice(1).join('/') : null;
-                resolve(p);
+                finish(p);
             });
-            child.on('error', () => resolve(null));
+            child.on('error', () => finish(null));
 
         } else {
             // Linux 平台：使用 zenity 图形化文件选择对话框
@@ -91,13 +106,22 @@ function openSystemFolderPicker(title: string): Promise<string | null> {
             const child = spawn('zenity', ['--file-selection', '--directory', `--title=${escaped}`], {
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
+            pickerProcess = child;
             let output = '';
             child.stdout.on('data', (d: Buffer) => {
                 output += d.toString();
             });
-            child.on('close', () => resolve(output.trim() || null));
-            child.on('error', () => resolve(null));
+            child.on('close', () => finish(output.trim() || null));
+            child.on('error', () => finish(null));
         }
+
+        // 安全兜底（10 分钟）：对话框是交互式的，用户浏览目录可合法占用很久，
+        // 不能用短超时；这里只防选择器进程异常挂死（从未打开也永不退出）导致
+        // Promise 永不 resolve。到点强杀并按「未选择」返回。
+        killer = setTimeout(() => {
+            pickerProcess?.kill();
+            finish(null);
+        }, PICKER_TIMEOUT_MS);
     });
 }
 

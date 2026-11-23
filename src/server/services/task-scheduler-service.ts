@@ -256,11 +256,17 @@ export class TaskScheduler {
      */
     private waitForConfirmation(taskId: string, signal: AbortSignal): Promise<void> {
         return new Promise<void>((resolve, reject) => {
-            this.confirmationResolvers.set(taskId, resolve);
+            // 正常确认路径也要移除 abort 监听：否则监听器随 signal 残留（每任务两处）
             const onAbort = () => {
                 this.confirmationResolvers.delete(taskId);
+                signal.removeEventListener('abort', onAbort);
                 reject(new Error('Aborted'));
             };
+            const resolveAndCleanup = () => {
+                signal.removeEventListener('abort', onAbort);
+                resolve();
+            };
+            this.confirmationResolvers.set(taskId, resolveAndCleanup);
             signal.addEventListener('abort', onAbort, {once: true});
         });
     }

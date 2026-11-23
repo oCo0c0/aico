@@ -16,6 +16,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import {writeFileAtomic} from '../utils/fs-utils.js';
 
 /** JSON 存储配置 */
 export interface JsonStoreConfig {
@@ -88,6 +89,8 @@ export class JsonStore<T extends { id: string }> {
      * 保存记录数组到磁盘
      *
      * 保存前自动按配置的 sortField 倒序排列，并截断到 maxRecords 条。
+     * 原子写（tmp + rename）：进程内所有 CRUD 均为同步操作天然串行，这里
+     * 防的是写盘中途崩溃/被并发读到的撕裂 JSON（详见 utils/fs-utils.ts）。
      * 子类可覆盖此方法实现自定义保存逻辑。
      */
     protected save(items: T[]): void {
@@ -96,7 +99,7 @@ export class JsonStore<T extends { id: string }> {
         const trimmed = this.maxRecords < Infinity
             ? sorted.slice(0, this.maxRecords)
             : sorted;
-        fs.writeFileSync(this.storeFile, JSON.stringify(trimmed, null, 2), 'utf-8');
+        writeFileAtomic(this.storeFile, JSON.stringify(trimmed, null, 2));
     }
 
     /** 按 sortField 倒序排列（原地排序） */

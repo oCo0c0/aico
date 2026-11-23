@@ -7,6 +7,7 @@
  */
 
 import {useEffect, useRef, useState, useCallback, useMemo, forwardRef, useImperativeHandle} from 'react';
+import {usePageActiveRef} from '../hooks/usePageActive';
 import {useTranslation} from 'react-i18next';
 import {apiGet, apiPost} from '../api';
 import {notifyTaskResult} from '../utils/notification';
@@ -182,6 +183,8 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
     }>({open: false});
     // DOM 引用：用于轮询清理
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
+    const isPageActive = usePageActiveRef((p) => p.startsWith('/pipeline-run') || p === '/execution');
     // 当前执行的已知全量日志（增量累积）：首次加载 logsFrom=0 拿全量，
     // 之后轮询从已知长度继续拉新增段拼接——修复「刷新后只剩服务端尾部 200 条」的截断
     const fullLogsRef = useRef<string[] | null>(null);
@@ -236,7 +239,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
         if (cached && cached.sig === sig) return cached.logs;
 
         // 如果是实时执行且有 WebSocket 推送，合并日志
-        let combined: Array<string | ExecutionLogEntry> = [...baseLogs];
+        const combined: Array<string | ExecutionLogEntry> = [...baseLogs];
         if (activeId === storeExecutionId && storeLogs.length > 0) {
             // 去重合并：避免重复显示（通过内容比对）
             for (const newLog of storeLogs) {
@@ -307,6 +310,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
         sawRunningRef.current = false;
         fullLogsRef.current = null; // 轮询周期重启（切换执行）：重新全量加载
         const poll = async () => {
+            if (!isPageActive()) return; // 非活跃页/隐藏标签页跳过本轮
             try {
                 // 增量拉取：首次全量（logsFrom=0），之后从已知长度只取新增段拼接全量视图；
                 // 服务端日志被重置（totalLogs 变小）时回退全量重新对齐
@@ -443,6 +447,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
             if (pollRef.current) clearInterval(pollRef.current);
             pollRef.current = setInterval(async () => {
                 try {
+                    if (!isPageActive()) return; // 非活跃页跳过本轮
                     if (!activeId) return;
                     const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
                     applyDetail(data);
@@ -481,6 +486,7 @@ const ExecutionPanel = forwardRef<PanelHandle, ExecutionPanelProps>(function Exe
             if (pollRef.current) clearInterval(pollRef.current);
             pollRef.current = setInterval(async () => {
                 try {
+                    if (!isPageActive()) return; // 非活跃页跳过本轮
                     if (!activeId) return;
                     const data = await apiGet<ExecutionDetail>(`/execution/${activeId}/status`);
                     applyDetail(data);

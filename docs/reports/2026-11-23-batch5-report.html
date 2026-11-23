@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Aico 批次⑤ 交付报告</title>
+<style>
+  :root {
+    --background: var(--card, #141c26);
+    --fg: var(--foreground, #d8e0e8);
+    --muted: var(--muted, #8195aa);
+    --border: var(--border, #233246);
+    --accent: var(--accent, #38bdf8);
+    --green: var(--success, #4ade80);
+    --amber: var(--warning, #fbbf24);
+    --red: var(--destructive, #f87171);
+    --code: var(--code-background, #1c2836);
+  }
+  * { box-sizing: border-box; }
+  body { font-family: var(--font-sans, "Segoe UI", "Microsoft YaHei", sans-serif); color: var(--fg); margin: 0; line-height: 1.7; font-size: 14px; }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 24px; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 12px; margin: 0 0 6px; }
+  h2 { font-size: 18px; margin-top: 34px; padding-left: 10px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 15px; margin-top: 22px; }
+  .meta { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11.5px; margin: 0 6px 6px 0; font-weight: 600; }
+  .b-green { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); }
+  .b-amber { background: color-mix(in srgb, var(--amber) 16%, transparent); color: var(--amber); }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th { text-align: left; color: var(--accent); border-bottom: 1px solid var(--border); padding: 7px 9px; white-space: nowrap; }
+  td { border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); padding: 7px 9px; vertical-align: top; }
+  code { background: var(--code); color: var(--accent); padding: 1px 5px; border-radius: 5px; font-size: 12px; font-family: var(--font-mono, Consolas, monospace); }
+  .path { color: var(--green); font-family: var(--font-mono, Consolas, monospace); font-size: 12px; }
+  .box { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 15px; margin: 12px 0; font-size: 13px; }
+  .bug { border-color: color-mix(in srgb, var(--red) 55%, transparent); }
+  .bug strong { color: var(--red); }
+  .order { counter-reset: step; }
+  .order h3 { counter-increment: step; }
+  .order h3::before { content: "Review " counter(step) " · "; color: var(--amber); }
+  ul { padding-left: 20px; margin: 8px 0; }
+  li { margin: 3px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Aico 批次⑤ 交付报告</h1>
+<p class="meta">2026-11-23 · 范围：ESLint 接入 / 路由业务下沉 / 壁纸上传流式化 / 事件总线类型化 · 验证：三端 tsc ✅ · vite build ✅ · vitest 34 文件 341 用例 ✅ · ESLint 0 error ✅</p>
+
+<p>
+  <span class="badge b-green">341 用例全过</span>
+  <span class="badge b-amber">ESLint 0 error / 151 warn（已分级留档）</span>
+  <span class="badge b-amber">1 个真 bug 被首跑抓到并修复</span>
+</p>
+
+<div class="box bug">
+  <strong>⚠️ 本批次最重要的发现：LogMessage.tsx 隐藏 hooks 违规（真 bug）</strong><br>
+  <code>useState(false)</code> 写在两个提前 <code>return</code>（tool 行 / thinking 行）之后——同一组件实例在
+  「工具行 ↔ 普通消息」间复用时，React 钩子数不一致，可能抛 <i>Rendered fewer hooks than expected</i> 或状态串行。
+  <b>ESLint react-hooks/rules-of-hooks 首跑即抓到</b>——这正是当初把 ESLint 排在批次⑤第一项的原因。已修复：钩子移到所有提前 return 之前。
+</div>
+
+<h2>① ESLint 接入（此前无任何 lint）</h2>
+<table>
+  <tr><th>文件</th><th>是什么 / 改了什么</th></tr>
+  <tr><td class="path">eslint.config.mjs<br><span style="color:var(--amber)">新增</span></td><td>平面配置。<b>只抓真 bug、不动代码风格</b>（无 Prettier，避免全仓重排淹没 diff）。error 级：rules-of-hooks；warn 级：exhaustive-deps(24)、no-unused-vars(91，批次⑥批量清)、no-case-declarations、no-explicit-any(12) 等——每条降级理由写在配置注释里。bridge.mjs 单独补 Node 全局量。</td></tr>
+  <tr><td class="path">package.json</td><td>新增 <code>pnpm lint</code> 脚本 + eslint / typescript-eslint / eslint-plugin-react-hooks devDependencies。</td></tr>
+  <tr><td class="path">.github/workflows/ci.yml</td><td>CI 新增 lint 步骤（error 拦截，warn 不拦）。</td></tr>
+  <tr><td class="path">src/client/components/LogMessage.tsx</td><td><b>真 bug 修复</b>（见上方红框），3 行改动。</td></tr>
+  <tr><td class="path">src/server/routes/plan.ts</td><td>删两处 <code>if (false)</code> 死分支与未用的 <code>isPipelineAgentMode</code>（no-constant-condition 抓到，即审查报告 server-L1）。</td></tr>
+  <tr><td class="path">validation.ts · mcp-config-service.ts · sandbox-service.ts · workspace.ts · structured-json.ts</td><td>六处无意义正则/字符串转义修正；字面 BOM 字符改 <code>﻿</code> 转义写法。</td></tr>
+  <tr><td class="path">input.tsx · appearance.ts</td><td>空接口改类型别名；HSL 数组初值删除（if/else-if 链有收尾 else，所有路径必有赋值）。</td></tr>
+</table>
+
+<h2>② 路由业务下沉第一步：XLSX 模板导出</h2>
+<table>
+  <tr><th>文件</th><th>是什么 / 改了什么</th></tr>
+  <tr><td class="path">src/server/services/plan-template-service.ts<br><span style="color:var(--amber)">新增</span></td><td>从 plan.ts 原样搬移的模板导出业务（-249 行）：<code>TaskExportRow</code> 任务行类型、<code>HEADER_ALIASES</code> 字段→中文列名别名表、<code>parseDropdowns</code> 下拉枚举解析、<code>matchClosestEnum</code> 枚举最近匹配、<code>buildExportRow</code> 导出行构造、<code>injectTasksToTemplate</code> XML 注入器（直改 sheet1.xml 保全部样式）；新增 <code>readTemplateSheet()</code> 包装 SheetJS 读取。文件头注释写明职责链。</td></tr>
+  <tr><td class="path">src/server/routes/plan.ts</td><td>删搬移块改 import（diff：+2/-249），导出路由只留参数校验与调度。plan.ts 1547→约 1300 行。</td></tr>
+</table>
+<div class="box">这只是第一步——execution.ts（1546 行）的测试三阶段流水线、plan.ts 剩余技能队列状态机是下一批下沉对象。</div>
+
+<h2>③ 壁纸上传流式化（内存峰值 2GB → 常量）</h2>
+<table>
+  <tr><th>文件</th><th>是什么 / 改了什么</th></tr>
+  <tr><td class="path">src/server/routes/wallpapers.ts</td><td><code>POST /upload</code> 由 express.raw（2GB 字节流整块读成 Buffer）改为 <code>pipeline(请求 → 限流生成器 → 临时文件)</code>：边收边计数、超限即断（413）、客户端断连不回写、失败清理临时文件。</td></tr>
+  <tr><td class="path">src/server/services/wallpaper-store-service.ts</td><td><code>add(buffer)</code> 替换为 <code>tempUploadPath()</code> + <code>addFromStream()</code>（扩展名校验 → rename 进 uploads/ → 写元数据，失败自动清临时文件）。无其他调用方，旧 API 直接移除。</td></tr>
+</table>
+
+<h2>④ 前端事件总线类型化（消灭 as 断言）</h2>
+<table>
+  <tr><th>文件</th><th>是什么 / 改了什么</th></tr>
+  <tr><td class="path">src/client/lib/ws-events.ts<br><span style="color:var(--amber)">新增</span></td><td><code>WsEventMap</code> 事件名→载荷类型对照表（5 种事件）+ <code>emitWsEvent()</code> / <code>onWsEvent()</code>（返回退订函数）。文件头注释写明背景与用法示例。</td></tr>
+  <tr><td class="path">useWebSocket.ts</td><td>12 个裸 <code>dispatchEvent(new CustomEvent(...))</code> 全部切 <code>emitWsEvent()</code>，载荷形状进编译期校验。</td></tr>
+  <tr><td class="path">AgentExecutionPage.tsx</td><td>监听改 onWsEvent，handler 参数获得类型（<code>(e as CustomEvent).detail</code> 断言删除）。</td></tr>
+  <tr><td class="path">ProjectsPage.tsx</td><td>ws-message 监听切换，原 <code>(msg: any)</code> 消灭。</td></tr>
+  <tr><td class="path">RequirementsPage.tsx</td><td>两个监听切换；<code>StoredRequirement</code> 接口导出（type-only 引用，无运行时环）。</td></tr>
+</table>
+
+<h2>建议的 Review 顺序</h2>
+<div class="order">
+  <h3>eslint.config.mjs — 看分级策略是否认可（error/warn 划分 + 每条注释）</h3>
+  <h3>LogMessage.tsx — 看 hooks 前移的 bug 修复（3 行改动）</h3>
+  <h3>plan-template-service.ts（新文件通读）→ plan.ts diff（应只有 -249/+2 与调用点替换）</h3>
+  <h3>wallpapers.ts 上传路由 + wallpaper-store-service.ts 的 addFromStream</h3>
+  <h3>ws-events.ts（新文件通读）→ useWebSocket / 三个页面 diff</h3>
+  <h3>杂项小修：plan.ts 死分支、六处转义、input.tsx、appearance.ts、ci.yml</h3>
+</div>
+
+<h2>明确留到批次⑥的（本批未动）</h2>
+<ul>
+  <li>no-unused-vars 91 处 / exhaustive-deps 24 处 / no-case-declarations 11 处——已在 eslint.config.mjs 注释登记，逐类批量清。</li>
+  <li>app-store.ts（1664 行）slice 拆分；execution.ts 测试三阶段流水线下沉；服务实例 DI 统一；长日志虚拟化；zod 校验替换。</li>
+  <li>手工验证建议：上传一个 &gt;100MB 视频（观察内存平稳）+ 导出一次 xlsx（对照样式/下拉完好）。</li>
+</ul>
+
+</div>
+</body>
+</html>

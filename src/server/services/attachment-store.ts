@@ -68,6 +68,12 @@ export class AttachmentStore {
         for (const [id, att] of this.entries) {
             if (now - att.createdAt > TTL_MS) this.entries.delete(id);
         }
+        // pendingByOwner 同步清理：owner（executionId）从未消费时，
+        // 附件全文（可达数百 KB/条）会永久驻留内存
+        for (const [owner, list] of this.pendingByOwner) {
+            const oldest = list.reduce((min, a) => Math.min(min, a.createdAt), Infinity);
+            if (Number.isFinite(oldest) && now - oldest > TTL_MS) this.pendingByOwner.delete(owner);
+        }
     }
 }
 

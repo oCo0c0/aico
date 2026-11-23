@@ -11,6 +11,7 @@ import {createAgentCoordinator, type CoordinatorConfig} from '../services/agent-
 import {WorkspaceService} from '../services/workspace-service.js';
 import type {MinerUService} from '../services/mineru-service.js';
 import {broadcast} from '../websocket.js';
+import {isPathWithinRoots} from '../middleware/validation.js';
 
 /** 附加文档的单文件内容上限（字符），防止超大文档撑爆上下文 */
 const MAX_DOCUMENT_CHARS = 100_000;
@@ -35,7 +36,7 @@ async function enrichWithDocuments(
     for (const relPath of documentPaths.slice(0, 5)) {
         if (typeof relPath !== 'string' || !relPath.trim()) continue;
         const fullPath = path.resolve(workspacePath, relPath.trim());
-        if (!fullPath.startsWith(workspaceRoot)) {
+        if (!isPathWithinRoots(fullPath, [workspaceRoot])) {
             skipped.push(`${relPath}（超出工作区范围）`);
             continue;
         }

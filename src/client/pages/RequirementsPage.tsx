@@ -12,6 +12,7 @@
  * 已保存的需求可在 Pipeline 运行时使用，实现需求驱动的开发流程。
  */
 import {useState, useEffect, useCallback, useRef} from 'react';
+import {onWsEvent} from '../lib/ws-events';
 import {useTranslation} from 'react-i18next';
 import {Joyride} from 'react-joyride';
 import {useGuide} from '../guides/useGuide';
@@ -78,7 +79,7 @@ import {
  * @description 已保存需求的完整信息接口
  * 包含从 ONES 获取并保存到本地后的所有详细信息
  */
-interface StoredRequirement extends Requirement {
+export interface StoredRequirement extends Requirement {
     /** 需求详细描述 */
     description: string;
     /** 验收标准列表 */
@@ -455,29 +456,19 @@ export default function RequirementsPage(): JSX.Element {
     }, []);
 
     // 监听后端图片下载完成事件，刷新需求描述（图片 URL 从远程变为本地路径）
-    useEffect(() => {
-        const handler = (e: Event) => {
-            const updated = (e as CustomEvent).detail;
-            if (!updated) return;
-            // 更新列表
-            setSaved(prev => prev.map(r => r.id === updated.id ? updated : r));
-            // 更新当前选中
-            setSelected(prev => prev?.id === updated.id ? updated : prev);
-            setSelectedRequirement(updated.id === selected?.id ? updated : null);
-        };
-        window.addEventListener('requirement:updated', handler);
-        return () => window.removeEventListener('requirement:updated', handler);
-    }, [selected?.id]);
+    useEffect(() => onWsEvent('requirement:updated', (updated) => {
+        if (!updated) return;
+        // 更新列表
+        setSaved(prev => prev.map(r => r.id === updated.id ? updated : r));
+        // 更新当前选中
+        setSelected(prev => prev?.id === updated.id ? updated : prev);
+        setSelectedRequirement(updated.id === selected?.id ? updated : null);
+    }), [selected?.id]);
 
     // 监听 agent 拉取过程事件（requirement:fetch_progress → requirement:fetch-progress）
-    useEffect(() => {
-        const handler = (e: Event) => {
-            const ev = (e as CustomEvent<RequirementFetchProgressEvent>).detail;
-            if (ev) applyActivityEvent(ev);
-        };
-        window.addEventListener('requirement:fetch-progress', handler);
-        return () => window.removeEventListener('requirement:fetch-progress', handler);
-    }, [applyActivityEvent]);
+    useEffect(() => onWsEvent('requirement:fetch-progress', (ev) => {
+        if (ev) applyActivityEvent(ev);
+    }), [applyActivityEvent]);
 
     /**
      * 通过 ID 从 MCP 获取需求并保存到本地

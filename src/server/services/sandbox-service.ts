@@ -14,7 +14,7 @@ import {getErrorMessage} from '../utils/error-utils.js';
 import {validateWorkspacePath} from '../middleware/validation.js';
 
 /** 禁止出现在沙箱命令中的 shell 元字符 */
-const SHELL_METACHARACTERS = /[;|&$()<>\`"']/;
+const SHELL_METACHARACTERS = /[;|&$()<>`"']/;
 
 /** Daytona 沙箱配置（从 AppConfig['daytona'] 提取） */
 export interface DaytonaConfig {

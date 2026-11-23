@@ -26,12 +26,16 @@ export interface WSMessage {
 
 /** WebSocket 服务器实例（模块级单例） */
 let wss: WebSocketServer | null = null;
+/** 心跳定时器（模块级，随 setupWebSocket 启动） */
+let heartbeatTimer: NodeJS.Timeout | null = null;
+/** 心跳间隔：每 30s ping 一次，两轮无 pong 视为死连接 */
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 /**
  * 初始化 WebSocket 服务
  *
  * 创建 WebSocketServer 并绑定到 HTTP 服务器，监听 /ws 路径。
- * 自动处理客户端连接、消息解析和连接错误。
+ * 自动处理客户端连接、消息解析、连接错误与死连接回收（心跳）。
  *
  * @param server - HTTP 服务器实例
  * @returns 初始化后的 WebSocketServer 实例
@@ -40,6 +44,11 @@ export function setupWebSocket(server: http.Server): WebSocketServer {
     wss = new WebSocketServer({server, path: '/ws'});
 
     wss.on('connection', (ws) => {
+        (ws as WebSocket & {isAlive?: boolean}).isAlive = true;
+        ws.on('pong', () => {
+            (ws as WebSocket & {isAlive?: boolean}).isAlive = true;
+        });
+
         ws.on('message', (raw) => {
             try {
                 const msg = JSON.parse(raw.toString()) as WSMessage;
@@ -53,6 +62,23 @@ export function setupWebSocket(server: http.Server): WebSocketServer {
             // 静默处理连接错误
         });
     });
+
+    // 心跳回收：客户端异常断网（拔线/休眠）时 TCP 不会立即感知，
+    // dead connection 会永远留在 wss.clients 里持续吃 send 预算。
+    // 每 30s ping 一轮，上一轮的 pong 没回来（isAlive=false）即判定死连接终止。
+    heartbeatTimer = setInterval(() => {
+        if (!wss) return;
+        wss.clients.forEach((client) => {
+            const ws = client as WebSocket & {isAlive?: boolean};
+            if (ws.isAlive === false) {
+                ws.terminate();
+                return;
+            }
+            ws.isAlive = false;
+            ws.ping();
+        });
+    }, HEARTBEAT_INTERVAL_MS);
+    heartbeatTimer.unref();
 
     return wss;
 }
@@ -81,7 +107,10 @@ export function broadcast(message: WSMessage): void {
     const payload = JSON.stringify(message);
     wss.clients.forEach((client) => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(payload);
+            // send 回调捕获发送失败（检查与发送之间连接可能刚好断掉），失败即终止连接
+            client.send(payload, (err) => {
+                if (err) client.terminate();
+            });
         }
     });
 }

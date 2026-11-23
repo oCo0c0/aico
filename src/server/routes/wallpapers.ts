@@ -24,7 +24,9 @@
  * - PUT    /settings      保存设置（patch 合并）
  */
 
-import express, {Router} from 'express';
+import {Router} from 'express';
+import fs from 'fs';
+import {pipeline} from 'stream/promises';
 import {WallpaperStoreService} from '../services/wallpaper-store-service.js';
 import {validateBody} from '../middleware/validation.js';
 import {getErrorMessage} from '../utils/error-utils.js';
@@ -43,24 +45,49 @@ export function createWallpaperRoutes(store: WallpaperStoreService): Router {
         res.json({wallpapers: store.list()});
     });
 
-    // 上传：原始字节流 + query/title + X-File-Name 头
-    router.post('/upload',
-        express.raw({type: '*/*', limit: MAX_UPLOAD_BYTES}),
-        (req, res) => {
+    // 上传：原始字节流 + query/title + X-File-Name 头。
+    // 流式落盘：请求体直接管道到临时文件再改名登记——此前 express.raw 会把
+    // 最大 2GB 的字节流整块读成 Buffer（4K 视频上传 = 峰值 2GB 堆内存）。
+    router.post('/upload', (req, res) => {
+        const origName = String(req.header('X-File-Name') || 'wallpaper');
+        const title = typeof req.query.title === 'string' ? req.query.title : undefined;
+        const tmpPath = store.tempUploadPath();
+        let received = 0;
+        let tooLarge = false;
+
+        void (async () => {
             try {
-                const origName = String(req.header('X-File-Name') || 'wallpaper');
-                const title = typeof req.query.title === 'string' ? req.query.title : undefined;
-                const body = req.body as Buffer;
-                if (!body || !Buffer.isBuffer(body) || body.length === 0) {
-                    res.status(400).json({code: 'VALIDATION_ERROR', message: '请求体为空'});
-                    return;
-                }
-                const meta = store.add(body, title, origName);
-                res.status(201).json({wallpaper: meta});
+                await pipeline(
+                    req,
+                    async function* (source) {
+                        // 生成器边收边计数，超限即中断管道（上游请求被销毁）
+                        for await (const chunk of source as AsyncIterable<Buffer>) {
+                            received += chunk.length;
+                            if (received > MAX_UPLOAD_BYTES) {
+                                tooLarge = true;
+                                throw new Error('payload too large');
+                            }
+                            yield chunk;
+                        }
+                    },
+                    fs.createWriteStream(tmpPath),
+                );
+                const meta = store.addFromStream(tmpPath, received, title, origName);
+                if (!res.writableEnded) res.status(201).json({wallpaper: meta});
             } catch (err) {
-                res.status(400).json({code: 'UPLOAD_ERROR', message: getErrorMessage(err)});
+                // 管道失败（超限/客户端中断/写盘错误）→ 清理临时文件再回错
+                try {
+                    fs.rmSync(tmpPath, {force: true});
+                } catch { /* ignore */ }
+                if (res.writableEnded || res.destroyed) return; // 客户端已断开，无法也应答
+                if (tooLarge) {
+                    res.status(413).json({code: 'PAYLOAD_TOO_LARGE', message: '上传超过 2GB 上限'});
+                } else {
+                    res.status(400).json({code: 'UPLOAD_ERROR', message: getErrorMessage(err)});
+                }
             }
-        });
+        })();
+    });
 
     // 设置（放于 /:id 之前，避免 settings 被当作 id）
     router.get('/settings', (_req, res) => {

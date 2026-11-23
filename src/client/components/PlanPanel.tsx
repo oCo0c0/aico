@@ -7,6 +7,7 @@
  * loadTarget 接收外部选中的计划、通过 onDataChanged 通知外层刷新列表。
  */
 import {useState, useEffect, useRef, useCallback, useMemo, forwardRef, useImperativeHandle} from 'react';
+import {usePageActiveRef} from '../hooks/usePageActive';
 import {useTranslation} from 'react-i18next';
 import {apiGet, apiPost, apiPut, pickFolder} from '../api';
 import {useAppStore} from '../stores/app-store';
@@ -165,7 +166,9 @@ const PlanPanel = forwardRef<PanelHandle, PlanPanelProps>(function PlanPanel(
     const [exporting, setExporting] = useState(false);
 
     // ─── 引用 ───
-    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);      // 轮询定时器引用
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
+    const isPageActive = usePageActiveRef((p) => p.startsWith('/pipeline-run') || p === '/plan');      // 轮询定时器引用
 
     // 对外暴露 send()：共用输入框发送时调用（原内置输入框的 onSend 逻辑）
     useImperativeHandle(ref, () => ({
@@ -272,6 +275,7 @@ const PlanPanel = forwardRef<PanelHandle, PlanPanelProps>(function PlanPanel(
         if (!activePlanId) return;
 
         const poll = async () => {
+            if (!isPageActive()) return; // 非活跃页/隐藏标签页跳过本轮
             try {
                 const result = await apiGet<StoredPlan>(`/plan/${activePlanId}`);
                 if (result.status === 'ready') {
@@ -544,6 +548,7 @@ const PlanPanel = forwardRef<PanelHandle, PlanPanelProps>(function PlanPanel(
             // 由于activePlanId未改变，需要手动重启轮询机制
             if (pollRef.current) clearInterval(pollRef.current);
             const poll = async () => {
+                if (!isPageActive()) return; // 非活跃页跳过本轮
                 try {
                     const result = await apiGet<StoredPlan>(`/plan/${activePlanId}`);
                     if (result.status === 'ready') {

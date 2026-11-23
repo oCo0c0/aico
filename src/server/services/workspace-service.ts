@@ -21,6 +21,7 @@ import crypto from 'crypto';
 import {spawn} from 'child_process';
 import {APP_DATA_DIR} from '../utils/constants.js';
 import {getErrorMessage} from '../utils/error-utils.js';
+import {isPathWithinRoots} from '../middleware/validation.js';
 
 /**
  * 工作区基本信息
@@ -202,6 +203,10 @@ function joinDiffs(staged: string, unstaged: string): string {
 
 /** 默认配置目录 */
 const CONFIG_DIR = APP_DATA_DIR;
+/** git 命令默认超时（本地操作足够；防止文件系统/钩子卡死拖挂请求） */
+const GIT_TIMEOUT_MS = 30_000;
+/** git 网络命令（fetch/ls-remote/pull 等）超时（大仓库 + 弱网） */
+const GIT_NETWORK_TIMEOUT_MS = 120_000;
 /** 工作区历史记录最大保存条数 */
 const MAX_HISTORY = 10;
 
@@ -557,6 +562,10 @@ export class WorkspaceService {
             if (statusLine.startsWith('??')) {
                 // 未跟踪文件：读取文件内容，生成模拟的纯新增 diff
                 const fullPath = path.join(resolvedPath, filePath);
+                // filePath 来自请求参数，resolve 后必须仍落在工作区内，防止任意文件读取
+                if (!isPathWithinRoots(fullPath, [resolvedPath])) {
+                    return {path: '', diff: '', additions: 0, deletions: 0};
+                }
                 try {
                     const content = fs.readFileSync(fullPath, 'utf-8');
                     const lines = content.split('\n');
@@ -709,6 +718,8 @@ export class WorkspaceService {
     async gitConflictDiff(workspacePath: string, filePath: string): Promise<string> {
         const cwd = path.resolve(workspacePath);
         const fullPath = path.join(cwd, filePath);
+        // filePath 来自请求参数，resolve 后必须仍落在工作区内，防止任意文件读取
+        if (!isPathWithinRoots(fullPath, [cwd])) return '';
         if (!fs.existsSync(fullPath)) return '';
         return fs.readFileSync(fullPath, 'utf-8');
     }
@@ -727,23 +738,37 @@ export class WorkspaceService {
      * @returns {Promise<string>} git 命令的标准输出内容
      * @throws {Error} 命令执行失败时抛出异常，包含 stderr 或退出码信息
      */
-    private execGit(cwd: string, args: string[]): Promise<string> {
+    private execGit(cwd: string, args: string[], timeoutMs: number = GIT_TIMEOUT_MS): Promise<string> {
         return new Promise((resolve, reject) => {
             const child = spawn('git', args, {cwd, stdio: ['ignore', 'pipe', 'pipe']});
             let stdout = '';
             let stderr = '';
+            let timer: NodeJS.Timeout | null = null;
+            const cleanup = (): void => {
+                if (timer) clearTimeout(timer);
+            };
+            // 超时保护：git fetch 等网络命令在对端无响应时会无限挂起，把整个请求拖死。
+            // 到点强杀并按超时失败（stdout/stderr 各 32MB 上限防内存膨胀）。
+            timer = setTimeout(() => {
+                child.kill();
+                reject(new Error(`git ${args.join(' ')} timed out after ${timeoutMs / 1000}s`));
+            }, timeoutMs);
             child.stdout.on('data', (d: Buffer) => {
-                stdout += d.toString();
+                if (stdout.length < 32 * 1024 * 1024) stdout += d.toString();
             });
             child.stderr.on('data', (d: Buffer) => {
-                stderr += d.toString();
+                if (stderr.length < 32 * 1024 * 1024) stderr += d.toString();
             });
             child.on('close', (code) => {
+                cleanup();
                 // code=0: 命令执行成功; code=1: diff 命令检测到差异（非错误）
                 if (code === 0 || code === 1) resolve(stdout);
                 else reject(new Error(stderr.trim() || `git ${args.join(' ')} exited with code ${code}`));
             });
-            child.on('error', (err) => reject(err));
+            child.on('error', (err) => {
+                cleanup();
+                reject(err);
+            });
         });
     }
 
@@ -1131,11 +1156,15 @@ export class WorkspaceService {
     async listRemoteBranches(workspacePath: string): Promise<string[]> {
         const cwd = path.resolve(workspacePath);
         // 先 fetch 保证最新
-        try { await this.execGit(cwd, ['fetch', '--quiet']); } catch { /* no remote */ }
+        try { await this.execGit(cwd, ['fetch', '--quiet'], GIT_NETWORK_TIMEOUT_MS); } catch { /* no remote */ }
         const output = await this.execGit(cwd, ['branch', '-r', '--format=%(refname:short)']);
         const seen = new Set<string>();
         return output.trim().split('\n')
             .map(line => line.trim().replace(/^[^/]+\//, ''))  // origin/main → main
-            .filter(name => name && !name.startsWith('HEAD') && !seen.has(name) && seen.add(name));
+            .filter(name => {
+                if (!name || name.startsWith('HEAD') || seen.has(name)) return false;
+                seen.add(name);
+                return true;
+            });
     }
 }

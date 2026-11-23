@@ -36,6 +36,8 @@ export function createASRRoutes(): Router {
                 method: 'POST',
                 ...(asr.apiKey ? {headers: {Authorization: `Bearer ${asr.apiKey}`}} : {}),
                 body: fd,
+                // 音频较大 + 上游慢：2 分钟兜底，防止挂死请求
+                signal: AbortSignal.timeout(120_000),
             });
             if (!upstream.ok) {
                 const detail = await upstream.text().catch(() => '');

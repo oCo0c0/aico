@@ -13,6 +13,7 @@
  */
 
 import {useState, useEffect, useCallback, useRef} from 'react';
+import {usePageActiveRef} from '../hooks/usePageActive';
 import {useSearchParams} from 'react-router-dom';
 import {useTranslation} from 'react-i18next';
 import {apiGet, apiPost, apiDelete} from '../api';
@@ -274,6 +275,8 @@ export default function TestsPage() {
     const [filter, setFilter] = useState<'all' | 'passed' | 'failed' | 'skipped'>('all');
     const [showRawOutput, setShowRawOutput] = useState(false);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
+    const isPageActive = usePageActiveRef((p) => p === '/tests');
 
     // === 执行上下文关联状态 ===
     const [linkedExecution, setLinkedExecution] = useState<ExecutionSummary | null>(null);
@@ -483,6 +486,7 @@ export default function TestsPage() {
         if (current?.status !== 'running') return;
 
         const poll = async () => {
+            if (!isPageActive()) return; // 非活跃页/隐藏标签页跳过本轮
             try {
                 const data = await apiGet<TestRunDetail>(`/tests/results/${activeId}`);
                 setDetail(data);

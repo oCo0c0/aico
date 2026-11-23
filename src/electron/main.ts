@@ -14,7 +14,7 @@
  */
 
 import {app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, Tray} from 'electron';
-import {ChildProcess, spawn} from 'child_process';
+import {ChildProcess, spawn, type StdioOptions} from 'child_process';
 import http from 'http';
 import path from 'path';
 import {fixPath} from './fix-path';
@@ -38,6 +38,10 @@ let petWin: BrowserWindow | null = null;
 let appUrl = '';
 /** 是否正在主动退出（区分服务端异常退出与正常关闭；托盘「退出」也置位） */
 let quitting = false;
+/** will-quit 已发起优雅关闭握手（防二次触发重入） */
+let shutdownHandshakeStarted = false;
+/** 主窗口当前是否隐藏到托盘（跨平台恢复入口的判定依据） */
+let windowHiddenToTray = false;
 /** 系统托盘（Windows；Tray 无引用会被 GC 回收，须模块级持有） */
 let tray: Tray | null = null;
 /** 桌面壳设置目录（Electron userData） */
@@ -66,7 +70,12 @@ function spawnServer(port: number): ChildProcess {
 
     // 生产模式日志落盘 fd（详见 server-stdio.ts：不能传未打开的 WriteStream）
     // APP_DATA_DIR 在模块加载时已解析并完成旧版目录 → ~/.aico 的一次性迁移
-    const stdio = buildServerStdio(isDev, path.join(APP_DATA_DIR, 'logs'));
+    // 追加第 4 路 'ipc' 通道：Windows 退出时经其发送优雅关闭握手（见 will-quit），
+    // 服务端 process.on('message') 收到后走与 SIGTERM 相同的清理路径
+    const baseStdio = buildServerStdio(isDev, path.join(APP_DATA_DIR, 'logs'));
+    const stdio: StdioOptions = Array.isArray(baseStdio)
+        ? [...baseStdio, 'ipc']
+        : ['inherit', 'inherit', 'inherit', 'ipc'];
 
     const proc = spawn(process.execPath, [bootstrapPath], {env, stdio});
     proc.on('exit', (code) => {
@@ -226,7 +235,7 @@ function createPetWindow(): void {
         show: false,
         focusable: false,
         alwaysOnTop: true,
-        title: 'ADW Pet',
+        title: 'Aico Pet',
         webPreferences: {
             contextIsolation: true,
             nodeIntegration: false,
@@ -276,9 +285,16 @@ function forwardPetInput(input: {kind: 'key' | 'mouse'; side: 'left' | 'right'})
     petWin.webContents.send('adw:pet-input', input);
 }
 
-/** 隐藏主窗口到系统托盘（win32）并气泡提示去向 */
+/**
+ * 隐藏主窗口到系统托盘并气泡提示去向（气泡仅 Windows）
+ *
+ * 平台差异：托盘图标在 win32 + macOS 创建；Linux 桌面环境托盘可用性参差，
+ * 不创建——隐藏后通过「再次启动应用」（second-instance）或 Dock/任务栏恢复。
+ */
 function hideToTray(): void {
-    win?.hide();
+    if (!win) return;
+    win.hide();
+    windowHiddenToTray = true;
     if (tray && process.platform === 'win32') {
         try {
             tray.displayBalloon({
@@ -297,14 +313,19 @@ function showMainWindow(): void {
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+    windowHiddenToTray = false;
 }
 
-/** 创建系统托盘（仅 Windows；左键恢复窗口，右键菜单 打开/退出） */
+/**
+ * 创建系统托盘（win32 + macOS；Linux 桌面托盘可用性参差，不创建，
+ * 隐藏窗口经「再次启动应用」或任务栏恢复）
+ * 左键/click 恢复窗口，右键菜单 打开/退出
+ */
 function createTray(): void {
-    if (process.platform !== 'win32') return;
+    if (process.platform !== 'win32' && process.platform !== 'darwin') return;
     const icon = nativeImage
         .createFromPath(path.join(appRoot(), 'resources', 'app-icon.png'))
-        .resize({width: 16, height: 16});
+        .resize({width: process.platform === 'darwin' ? 18 : 16, height: process.platform === 'darwin' ? 18 : 16});
     tray = new Tray(icon);
     tray.setToolTip('Aico');
     tray.setContextMenu(
@@ -320,8 +341,10 @@ function createTray(): void {
             },
         ]),
     );
-    // Windows 惯例：左键点击托盘图标即恢复窗口
-    tray.on('click', () => showMainWindow());
+    // Windows 惯例：左键点击托盘图标即恢复窗口（macOS 左键默认弹菜单）
+    if (process.platform === 'win32') {
+        tray.on('click', () => showMainWindow());
+    }
 }
 
 // ---- 生命周期 ----
@@ -331,9 +354,10 @@ if (!gotLock) {
     app.quit();
 } else {
     app.on('second-instance', () => {
-        if (win) {
-            if (win.isMinimized()) win.restore();
-            win.focus();
+        // 再次启动应用 → 恢复既有实例窗口（含隐藏到托盘的场景：Linux 无托盘
+        // 图标，重新打开应用是主要恢复入口）
+        if (win && !win.isDestroyed()) {
+            showMainWindow();
         }
     });
 
@@ -407,7 +431,9 @@ if (!gotLock) {
             createTray();
 
             app.on('activate', () => {
+                // macOS Dock 点击：窗口已存在（含隐藏到托盘）→ 恢复；否则新建
                 if (BrowserWindow.getAllWindows().length === 0) createWindow(url);
+                else showMainWindow();
             });
         } catch (err) {
             // 同步启动错误（如 spawn 参数异常）以弹窗呈现而非静默 unhandled rejection
@@ -423,13 +449,47 @@ if (!gotLock) {
         quitting = true;
     });
 
-    app.on('will-quit', () => {
-        // POSIX: SIGTERM → 服务端既有优雅清理（dispose 沙箱/子进程后自行退出）
-        // Windows: kill() 为 TerminateProcess 强杀（已知限制，见计划文档）
-        serverProc?.kill();
+    app.on('will-quit', (event) => {
         destroyPetWindow();
         tray?.destroy();
         tray = null;
+
+        if (!serverProc || serverProc.exitCode !== null) return;
+
+        // POSIX: SIGTERM → 服务端既有优雅清理（dispose 沙箱/子进程后自行退出）
+        if (process.platform !== 'win32') {
+            serverProc.kill();
+            return;
+        }
+
+        // Windows: kill() 是 TerminateProcess 强杀，服务端的信号清理逻辑不会运行，
+        // bridge / pi RPC / MCP servers 等孙进程会孤儿化。改为 IPC 关闭握手：
+        // 发送 shutdown 消息 → 服务端走与 SIGTERM 相同的清理路径 → 退出；
+        // 兜底 5 秒超时强杀（服务端崩溃未建立 IPC、消息丢失等）。
+        if (!shutdownHandshakeStarted) {
+            shutdownHandshakeStarted = true;
+            event.preventDefault();
+            const forceKill = setTimeout(() => {
+                serverProc?.kill();
+                app.quit();
+            }, 5000);
+            serverProc.once('exit', () => {
+                clearTimeout(forceKill);
+                app.quit();
+            });
+            try {
+                serverProc.send?.('adw:shutdown');
+            } catch {
+                // IPC 通道未建立（服务端启动即崩溃）→ 直接强杀
+                clearTimeout(forceKill);
+                serverProc.kill();
+                app.quit();
+            }
+            return;
+        }
+
+        // 握手已发起过（超时强杀/服务端退出引发的二次 will-quit）→ 兜底强杀
+        serverProc.kill();
     });
 
     app.on('window-all-closed', () => {

@@ -12,6 +12,8 @@
  */
 
 import {useEffect, useRef, useState, useCallback, useMemo} from 'react';
+import {onWsEvent, type AgentExecutionUpdateEvent} from '../lib/ws-events';
+import {usePageActiveRef} from '../hooks/usePageActive';
 import {useTranslation} from 'react-i18next';
 import {apiGet, apiPost, apiPut, apiDelete, pickFolder} from '../api';
 import {notifyTaskResult} from '../utils/notification';
@@ -210,6 +212,8 @@ export default function AgentExecutionPage() {
 
     // DOM 引用
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
+    const isPageActive = usePageActiveRef((p) => p === '/agent-execution');
     // 本次任务期间是否见到过运行中状态（ref 跨 effect 重建保持，局部变量会因依赖抖动被重置）
     const sawRunningRef = useRef(false);
 
@@ -556,8 +560,8 @@ export default function AgentExecutionPage() {
     useEffect(() => {
         if (!activeId) return;
 
-        const handler = (e: Event) => {
-            const {type, executionId, ...data} = (e as CustomEvent).detail;
+        const handler = (detail: AgentExecutionUpdateEvent) => {
+            const {type, executionId, ...data} = detail;
 
             // 工具权限请求：入确认队列（在 activeId 过滤之前处理——
             // 后台执行的任务同样需要确认，否则弹窗被吞、后端挂到超时）
@@ -665,8 +669,7 @@ export default function AgentExecutionPage() {
             });
         };
 
-        window.addEventListener('agent-execution:update', handler);
-        return () => window.removeEventListener('agent-execution:update', handler);
+        return onWsEvent('agent-execution:update', handler);
     }, [activeId, loadHistory]);
 
     // 轮询当前执行状态（不再被 isRunning 阻断，避免 ready→running 竞态）。
@@ -681,6 +684,7 @@ export default function AgentExecutionPage() {
         sawRunningRef.current = false;
 
         const poll = async () => {
+            if (!isPageActive()) return; // 非活跃页/隐藏标签页跳过本轮
             try {
                 const data = await apiGet<AgentExecutionDetail>(`/agent-execution/${activeId}/detail`);
                 if (cancelled) return;

@@ -27,7 +27,7 @@ import {spawn} from 'child_process';
 import {getErrorMessage} from '../utils/error-utils.js';
 
 /** 禁止出现在 MCP 命令/参数中的 shell 元字符，防止命令注入 */
-const SHELL_METACHARACTERS = /[;|&$()<>\`\"']/;
+const SHELL_METACHARACTERS = /[;|&$()<>`"']/;
 
 /**
  * 校验 MCP 命令字符串是否安全。

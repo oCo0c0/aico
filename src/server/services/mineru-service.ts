@@ -144,7 +144,7 @@ export class MinerUService {
         }
         const start = Date.now();
         try {
-            const res = await fetch(`${this.getBaseUrl()}/health`);
+            const res = await fetch(`${this.getBaseUrl()}/health`, {signal: AbortSignal.timeout(10_000)});
             const latency = Date.now() - start;
             return {healthy: res.ok, latency, error: res.ok ? undefined : `HTTP ${res.status}`};
         } catch (err) {
@@ -177,6 +177,8 @@ export class MinerUService {
             const res = await fetch(`${this.getBaseUrl()}/file_parse`, {
                 method: 'POST',
                 body: fd,
+                // 大 PDF 上传 + 上游解析排队：5 分钟兜底
+                signal: AbortSignal.timeout(300_000),
             });
 
             if (!res.ok) {
@@ -218,6 +220,7 @@ export class MinerUService {
             const res = await fetch(`${this.getBaseUrl()}/tasks`, {
                 method: 'POST',
                 body: fd,
+                signal: AbortSignal.timeout(300_000),
             });
 
             if (!res.ok) {
@@ -241,7 +244,7 @@ export class MinerUService {
         if (!this.isEnabled()) return {task_id: taskId, status: 'failed', error: 'MinerU service is disabled'};
 
         try {
-            const res = await fetch(`${this.getBaseUrl()}/tasks/${encodeURIComponent(taskId)}`);
+            const res = await fetch(`${this.getBaseUrl()}/tasks/${encodeURIComponent(taskId)}`, {signal: AbortSignal.timeout(30_000)});
             if (!res.ok) {
                 const text = await res.text();
                 return {task_id: taskId, status: 'failed', error: `HTTP ${res.status}: ${text.substring(0, 300)}`};
@@ -258,7 +261,7 @@ export class MinerUService {
         if (!this.isEnabled()) return {success: false, error: 'MinerU service is disabled'};
 
         try {
-            const res = await fetch(`${this.getBaseUrl()}/tasks/${encodeURIComponent(taskId)}/result`);
+            const res = await fetch(`${this.getBaseUrl()}/tasks/${encodeURIComponent(taskId)}/result`, {signal: AbortSignal.timeout(30_000)});
             if (!res.ok) {
                 const text = await res.text();
                 return {success: false, error: `HTTP ${res.status}: ${text.substring(0, 300)}`};

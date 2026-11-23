@@ -98,18 +98,9 @@ async function startCLI(): Promise<void> {
 
     printBanner(port, version);
 
-    // 优雅关闭处理
-    const shutdown = () => {
-        console.log('\n  Shutting down...');
-        server.close(() => {
-            process.exit(0);
-        });
-        // 5秒后强制退出
-        setTimeout(() => process.exit(1), 5000);
-    };
-
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    // 优雅关闭由 createServer 内部统一注册（SIGINT/SIGTERM/桌面壳 IPC 握手），
+    // 这里不再重复注册 —— 双注册会让两套清理逻辑竞速 exit，server.close 永远走不完。
+    void server;
 }
 
 startCLI().catch((err) => {

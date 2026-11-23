@@ -10,7 +10,7 @@
  */
 
 function parseBalanced(raw: string): unknown | undefined {
-    const start = raw.search(/[\[{]/);
+    const start = raw.search(/[{[]/);
     if (start < 0) return undefined;
     const span = balancedSpanAt(raw, start);
     return span?.value;
@@ -178,7 +178,7 @@ export function extractJsonArray(raw: string): unknown[] | undefined {
 export function parseFrontMatter(content: string): Record<string, string> {
     const result: Record<string, string> = {};
 
-    const match = content.match(/^﻿?---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
+    const match = content.match(/^\ufeff?---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
     if (!match) return result;
 
     for (const line of match[1].split('\n')) {

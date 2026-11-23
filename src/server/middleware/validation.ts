@@ -10,7 +10,7 @@ import {Request, Response, NextFunction} from 'express';
 import path from 'path';
 
 /** 禁止出现在可执行命令/参数中的 shell 元字符 */
-const SHELL_METACHARACTERS = /[;|&$()<>\`"']/;
+const SHELL_METACHARACTERS = /[;|&$()<>`"']/;
 
 /**
  * 校验字符串是否不含 shell 元字符，防止通过命令字符串拼接触发命令注入。
@@ -28,6 +28,7 @@ export function validateShellSafeInput(value: unknown, fieldName: string): strin
     }
     return value;
 }
+
 export interface APIError {
     /** 错误码（如 VALIDATION_ERROR、INTERNAL_ERROR） */
     code: string;
@@ -37,6 +38,17 @@ export interface APIError {
     details?: unknown;
     /** 修复建议（可选） */
     suggestion?: string;
+}
+
+/**
+ * 带 HTTP 状态码的错误：服务层抛出后由全局 errorHandler 转换为对应状态响应
+ * （默认仍回 500；输入不合法类错误应抛 400，避免把用户错误当服务器故障）
+ */
+export class HttpError extends Error {
+    constructor(readonly status: number, message: string) {
+        super(message);
+        this.name = 'HttpError';
+    }
 }
 
 /** 字段验证规则 */
@@ -113,6 +125,16 @@ export function validateBody(rules: FieldRule[]) {
  * @param _next - 下一个中间件函数（未使用，Express 签名要求）
  */
 export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction): void {
+    // HttpError：调用方主动抛出的预期错误（输入不合法等），按携带的状态码返回
+    if (err instanceof HttpError) {
+        res.status(err.status).json({
+            code: err.status === 400 ? 'VALIDATION_ERROR' : 'REQUEST_ERROR',
+            message: err.message,
+        } satisfies APIError);
+        return;
+    }
+    // 非预期错误：记录完整错误便于排查，只把消息回给客户端（避免堆栈外泄）
+    console.error('[error]', err);
     const apiError: APIError = {
         code: 'INTERNAL_ERROR',
         message: err.message || 'An unexpected error occurred',

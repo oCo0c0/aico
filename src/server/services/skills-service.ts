@@ -245,8 +245,10 @@ export class SkillsService {
      * @returns 技能详情对象，未找到时返回 undefined
      */
     get(name: string): SkillDetail | undefined {
+        // name 来自路由参数，先净化（与 delete() 同规则），防止路径遍历读任意文件
+        const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '-');
         // 1. 搜索 commands/ 目录（扁平 .md 文件）
-        const commandFile = path.join(this.commandsDir, `${name}.md`);
+        const commandFile = path.join(this.commandsDir, `${safeName}.md`);
         if (fs.existsSync(commandFile)) {
             try {
                 const content = fs.readFileSync(commandFile, 'utf-8');
@@ -263,7 +265,7 @@ export class SkillsService {
         }
 
         // 2. 搜索 skills/ 目录（子目录结构）
-        const skillDir = path.join(this.skillsDir, name);
+        const skillDir = path.join(this.skillsDir, safeName);
         if (fs.existsSync(skillDir)) {
             try {
                 const stat = fs.statSync(skillDir);
@@ -286,7 +288,7 @@ export class SkillsService {
         }
 
         // 3. 搜索 skills/ 根目录的 .md 文件
-        const skillFile = path.join(this.skillsDir, `${name}.md`);
+        const skillFile = path.join(this.skillsDir, `${safeName}.md`);
         if (fs.existsSync(skillFile)) {
             try {
                 const content = fs.readFileSync(skillFile, 'utf-8');

@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Lint（error 拦截；warn 不拦，见 eslint.config.mjs 分级说明）
+        run: pnpm lint
+
       - name: Type check
         run: npx tsc --noEmit
 

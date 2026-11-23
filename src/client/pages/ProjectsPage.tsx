@@ -7,6 +7,7 @@
  */
 
 import {useState, useEffect, useCallback} from 'react';
+import {onWsEvent} from '../lib/ws-events';
 import {useTranslation} from 'react-i18next';
 import {motion, AnimatePresence} from 'framer-motion';
 import {
@@ -636,33 +637,31 @@ export default function ProjectsPage() {
         loadTasks();
     }, [loadTasks]);
 
-    // WebSocket 事件处理
-    useEffect(() => {
-        const handler = (msg: any) => {
-            const taskId = msg.data?.taskId;
-            if (msg.type === 'task:status_change' && taskId) {
-                setTasks(prev => prev.map(t =>
-                    t.id === taskId ? {...t, status: msg.data.status, phase: msg.data.phase} : t
-                ));
-            }
-            if (msg.type === 'task:log' && taskId) {
-                const log: TaskLog = {
-                    timestamp: msg.data?.log?.timestamp || new Date().toISOString(),
-                    phase: msg.data?.log?.phase || 'idle',
-                    logType: msg.data?.log?.logType || 'info',
-                    content: msg.data?.log?.content || '',
-                };
-                setTaskLogs(prev => ({
-                    ...prev,
-                    [taskId]: [...(prev[taskId] || []), log],
-                }));
-            }
-        };
-
-        // 通过 custom event 监听（由 useWebSocket 触发）
-        window.addEventListener('ws-message', ((e: CustomEvent) => handler(e.detail)) as EventListener);
-        return () => window.removeEventListener('ws-message', ((e: CustomEvent) => handler(e.detail)) as EventListener);
-    }, []);
+    // WebSocket 事件处理（经类型化事件总线，由 useWebSocket 转发）
+    useEffect(() => onWsEvent('ws-message', (msg) => {
+        const d = msg.data as Record<string, Record<string, unknown> | undefined> | undefined;
+        const taskId = d?.taskId as string | undefined;
+        if (msg.type === 'task:status_change' && taskId) {
+            setTasks(prev => prev.map(t =>
+                t.id === taskId
+                    ? {...t, status: d?.status as unknown as TaskInfo['status'], phase: d?.phase as unknown as TaskInfo['phase']}
+                    : t
+            ));
+        }
+        if (msg.type === 'task:log' && taskId) {
+            const logSource = d?.log as Record<string, string | undefined> | undefined;
+            const log: TaskLog = {
+                timestamp: logSource?.timestamp || new Date().toISOString(),
+                phase: (logSource?.phase || 'idle') as TaskLog['phase'],
+                logType: (logSource?.logType || 'info') as TaskLog['logType'],
+                content: logSource?.content || '',
+            };
+            setTaskLogs(prev => ({
+                ...prev,
+                [taskId]: [...(prev[taskId] || []), log],
+            }));
+        }
+    }), []);
 
     // 任务操作
     const handlePauseTask = async (taskId: string) => {

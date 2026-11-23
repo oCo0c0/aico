@@ -115,6 +115,9 @@ interface LogMessageProps {
  */
 export const LogMessage = memo(function LogMessage({message}: LogMessageProps) {
     // 工具事件：渲染为单行工具行（分类图标 + 摘要 + 可展开 IN/OUT）
+    // 钩子必须在任何提前 return 之前调用（此前 useState 在 return 之后，
+    // 组件在 tool/thinking 与其他 kind 间复用时钩子数不一致——rules-of-hooks 违规）
+    const [copied, setCopied] = useState(false);
     if (message.kind === 'tool' && message.tool) {
         return <ToolEventRow tool={message.tool}/>;
     }
@@ -127,7 +130,6 @@ export const LogMessage = memo(function LogMessage({message}: LogMessageProps) {
     const isUser = message.kind === 'user';
     // 最终答复：左侧竖条强调（同 user 消息机制，绿色系），让汇总在流里一眼可辨
     const isAssistant = message.kind === 'assistant';
-    const [copied, setCopied] = useState(false);
 
     const handleCopy = async () => {
         try {

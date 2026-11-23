@@ -21,6 +21,20 @@ function run(cmd, args, env = process.env) {
     return spawn(cmd, args, {stdio: 'inherit', shell: true, env});
 }
 
+/**
+ * 结束进程及其子进程树。
+ * Windows 上 spawn 起的是 cmd 垫片，kill() 只杀垫片本身，真正的 node/electron
+ * 子进程会残留（表现为下次启动端口占用）——用 taskkill /T 连树一起收。
+ */
+function killTree(proc) {
+    if (!proc.pid || proc.exitCode !== null) return;
+    if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {stdio: 'ignore'});
+    } else {
+        proc.kill();
+    }
+}
+
 console.log('[dev:desktop] compiling electron main ...');
 const tsc = spawnSync('pnpm', ['exec', 'tsc', '-p', 'tsconfig.electron.json'], {
     stdio: 'inherit',
@@ -60,11 +74,11 @@ console.log('[dev:desktop] launching electron ...');
 const electron = run('pnpm', ['exec', 'electron', '.'], ELECTRON_ENV);
 
 const cleanup = () => {
-    electron.kill();
-    vite.kill();
+    killTree(electron);
+    killTree(vite);
 };
 electron.on('exit', (code) => {
-    vite.kill();
+    killTree(vite);
     process.exit(code ?? 0);
 });
 process.on('SIGINT', () => {

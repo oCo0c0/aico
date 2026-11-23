@@ -14,11 +14,13 @@
 
 import {useEffect, useRef, useCallback} from 'react';
 import {useAppStore} from '../stores/app-store';
+import {emitWsEvent, type RequirementUpdatedEvent} from '../lib/ws-events';
+import type {RequirementFetchProgressEvent} from '../components/RequirementFetchActivity';
 
-/** 最大重连次数 */
-const MAX_RETRIES = 5;
 /** 基础重连延迟（毫秒），实际延迟 = BASE_DELAY * 2^attempt */
 const BASE_DELAY = 1000; // 1 秒
+/** 重连延迟上限：退避封顶 30s（无限重连，服务端重启/长断网后自动恢复） */
+const MAX_BACKOFF_DELAY = 30_000;
 
 /**
  * 计算指数退避延迟时间
@@ -37,7 +39,7 @@ const BASE_DELAY = 1000; // 1 秒
  * calculateBackoff(3) // => 8000  (8s)
  */
 export function calculateBackoff(attempt: number, baseDelay: number = BASE_DELAY): number {
-    return baseDelay * Math.pow(2, attempt);
+    return Math.min(baseDelay * Math.pow(2, attempt), MAX_BACKOFF_DELAY);
 }
 
 
@@ -46,7 +48,8 @@ export function calculateBackoff(attempt: number, baseDelay: number = BASE_DELAY
  *
  * 功能特性:
  *   - 组件挂载时自动建立 WebSocket 连接
- *   - 连接断开后按指数退避策略自动重连（最多 5 次）
+ *   - 连接断开后按指数退避策略无限重连（30s 封顶）——服务端重启或长断网后自动恢复，
+ *     网络恢复（online）/切回标签页（visibilitychange）时立即重试
  *   - 连接成功后重置重试计数器
  *   - 根据消息类型自动分发到对应的 Store action
  *   - 组件卸载时清理连接和定时器，防止内存泄漏
@@ -192,17 +195,17 @@ export function useWebSocket() {
                     // 多任务状态变更：分发 custom event 给 ProjectsPage
                     case 'task:status_change':
                     case 'task:log':
-                        window.dispatchEvent(new CustomEvent('ws-message', {detail: message}));
+                        emitWsEvent('ws-message', message);
                         break;
 
                     // 需求更新（图片下载完成后 description 中 URL 被重写）
                     case 'requirement:updated':
-                        window.dispatchEvent(new CustomEvent('requirement:updated', {detail: message.data}));
+                        emitWsEvent('requirement:updated', (message.data ?? {id: ''}) as RequirementUpdatedEvent);
                         break;
 
                     // 需求拉取过程（agent 工具调用/思考/重试），分发给需求页活动面板实时渲染
                     case 'requirement:fetch_progress':
-                        window.dispatchEvent(new CustomEvent('requirement:fetch-progress', {detail: message.data}));
+                        emitWsEvent('requirement:fetch-progress', (message.data ?? {}) as RequirementFetchProgressEvent);
                         break;
 
                     // Agent决策过程：展示Think-Act-Observe-Reflect循环
@@ -301,9 +304,7 @@ export function useWebSocket() {
                         if (question) {
                             addAgentLog(`❓ Agent提问: ${question}`);
                             // 触发自定义事件，供页面组件处理
-                            window.dispatchEvent(new CustomEvent('agent:question', {
-                                detail: {executionId: message.data.executionId, question}
-                            }));
+                            emitWsEvent('agent:question', {executionId: message.data.executionId, question});
                         }
                         break;
 
@@ -339,9 +340,7 @@ export function useWebSocket() {
                             if (typeof message.data?.executionId === 'string') {
                                 addAgentLogToExecution(message.data.executionId, `${icon} ${thought.content}`);
                             }
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {type: 'thought', executionId: message.data?.executionId, thought}
-                            }));
+                            emitWsEvent('agent-execution:update', {type: 'thought', executionId: message.data?.executionId, thought});
                         }
                         break;
 
@@ -358,16 +357,14 @@ export function useWebSocket() {
                     case 'agent-execution:subtask':
                         const subTaskMsg = message.data;
                         if (subTaskMsg) {
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {
-                                    type: 'subtask',
-                                    executionId: message.data?.executionId,
-                                    subTaskId: subTaskMsg.subTaskId,
-                                    title: subTaskMsg.title,
-                                    status: subTaskMsg.status,
-                                    completedAt: subTaskMsg.completedAt,
-                                }
-                            }));
+                            emitWsEvent('agent-execution:update', {
+                                type: 'subtask',
+                                executionId: message.data?.executionId,
+                                subTaskId: subTaskMsg.subTaskId,
+                                title: subTaskMsg.title,
+                                status: subTaskMsg.status,
+                                completedAt: subTaskMsg.completedAt,
+                            });
                         }
                         break;
 
@@ -376,9 +373,7 @@ export function useWebSocket() {
                     case 'agent-execution:status':
                         const execStatus = message.data?.status;
                         if (execStatus) {
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {type: 'status', executionId: message.data?.executionId, status: execStatus}
-                            }));
+                            emitWsEvent('agent-execution:update', {type: 'status', executionId: message.data?.executionId, status: execStatus});
                         }
                         break;
 
@@ -386,13 +381,11 @@ export function useWebSocket() {
                     // 消费（queued:false）在 drain 完成即广播，页面据此即时清排队条，
                     // 不等 1.5s 轮询（此前队列变化只能靠轮询/loadDetail）
                     case 'agent-execution:queued_update':
-                        window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                            detail: {
-                                type: 'queued_update',
-                                executionId: message.data?.executionId,
-                                queued: message.data?.queued,
-                            }
-                        }));
+                        emitWsEvent('agent-execution:update', {
+                            type: 'queued_update',
+                            executionId: message.data?.executionId,
+                            queued: message.data?.queued,
+                        });
                         break;
 
                     // Agent执行页 - 完成通知
@@ -407,13 +400,11 @@ export function useWebSocket() {
                             }
                         }
                         if (message.data?.executionId && message.data?.status) {
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {
-                                    type: 'status',
-                                    executionId: message.data.executionId,
-                                    status: message.data.status
-                                }
-                            }));
+                            emitWsEvent('agent-execution:update', {
+                                type: 'status',
+                                executionId: message.data.executionId,
+                                status: message.data.status
+                            });
                         }
                         break;
 
@@ -424,9 +415,7 @@ export function useWebSocket() {
                             if (typeof message.data?.executionId === 'string') {
                                 addAgentLogToExecution(message.data.executionId, logMsg);
                             }
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {type: 'log', executionId: message.data?.executionId, log: logMsg}
-                            }));
+                            emitWsEvent('agent-execution:update', {type: 'log', executionId: message.data?.executionId, log: logMsg});
                         }
                         break;
 
@@ -434,14 +423,12 @@ export function useWebSocket() {
                     case 'agent-execution:stepLog':
                         const stepLogData = message.data;
                         if (stepLogData?.stepId && stepLogData?.log) {
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {
-                                    type: 'stepLog',
-                                    executionId: stepLogData.executionId,
-                                    stepId: stepLogData.stepId,
-                                    log: stepLogData.log,
-                                }
-                            }));
+                            emitWsEvent('agent-execution:update', {
+                                type: 'stepLog',
+                                executionId: stepLogData.executionId,
+                                stepId: stepLogData.stepId,
+                                log: stepLogData.log,
+                            });
                         }
                         break;
 
@@ -452,17 +439,15 @@ export function useWebSocket() {
                             if (typeof pr.executionId === 'string') {
                                 addAgentLogToExecution(pr.executionId, `⏸ 请求确认工具：${pr.toolName || ''}`);
                             }
-                            window.dispatchEvent(new CustomEvent('agent-execution:update', {
-                                detail: {
-                                    type: 'permission_request',
-                                    executionId: pr.executionId,
-                                    permissionRequestId: pr.permissionRequestId,
-                                    toolName: pr.toolName,
-                                    toolInput: pr.toolInput,
-                                    title: pr.title,
-                                    displayName: pr.displayName,
-                                }
-                            }));
+                            emitWsEvent('agent-execution:update', {
+                                type: 'permission_request',
+                                executionId: pr.executionId,
+                                permissionRequestId: pr.permissionRequestId,
+                                toolName: pr.toolName,
+                                toolInput: pr.toolInput,
+                                title: pr.title,
+                                displayName: pr.displayName,
+                            });
                         }
                         break;
                     }
@@ -497,19 +482,16 @@ export function useWebSocket() {
         // 接收消息：委托给 handleMessage 处理
         ws.onmessage = handleMessage;
 
-        // 连接关闭：清理引用并在未超过最大重试次数时启动退避重连
+        // 连接关闭：清理引用并按指数退避延迟后重连（无限重试，30s 封顶）
         ws.onclose = () => {
             setWsConnected(false);
             wsRef.current = null;
 
-            // 未超过最大重试次数时，按指数退避延迟后尝试重连
-            if (retriesRef.current < MAX_RETRIES) {
-                const delay = calculateBackoff(retriesRef.current);
-                reconnectTimerRef.current = setTimeout(() => {
-                    retriesRef.current++;
-                    connect();
-                }, delay);
-            }
+            const delay = calculateBackoff(retriesRef.current);
+            retriesRef.current++;
+            reconnectTimerRef.current = setTimeout(() => {
+                connect();
+            }, delay);
         };
 
         // 连接出错：主动关闭连接（会触发 onclose，在那里处理重连逻辑）
@@ -523,7 +505,26 @@ export function useWebSocket() {
     useEffect(() => {
         connect();
 
+        // 网络恢复 / 切回标签页时立即重连：不必等下一轮退避（最长 30s）
+        // ——后端重启完成、笔记本休眠唤醒是典型场景
+        const reconnectNow = () => {
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
+            }
+            connect();
+        };
+        const onOnline = () => reconnectNow();
+        const onVisibility = () => {
+            if (document.visibilityState === 'visible') reconnectNow();
+        };
+        window.addEventListener('online', onOnline);
+        document.addEventListener('visibilitychange', onVisibility);
+
         return () => {
+            window.removeEventListener('online', onOnline);
+            document.removeEventListener('visibilitychange', onVisibility);
             // 清理：取消待执行的重连定时器
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current);

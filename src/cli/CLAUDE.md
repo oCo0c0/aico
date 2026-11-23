@@ -19,7 +19,7 @@
 3. `findAvailablePort({preferredPort})` -- 查找可用端口（支持端口偏好）
 4. `createServer(port)` -- 创建并启动 Express + WebSocket 服务（来自 `server/index.ts`）
 5. `printBanner(port, version)` -- 打印启动横幅
-6. 注册 SIGINT/SIGTERM 优雅关闭
+6. 优雅关闭由 `createServer` 内部统一注册（SIGINT/SIGTERM/桌面壳 IPC 握手）
 
 ## 对外接口
 
@@ -44,4 +44,5 @@ src/cli/
 
 | 日期 | 操作 | 说明 |
 |------|------|------|
+| 2026-11-18 | 更新 | 优雅关闭职责收敛到 `createServer`（server/index.ts 单点注册 SIGINT/SIGTERM/桌面壳 IPC 握手，含 dispose 顺序与 5s 强退兜底），CLI 入口不再重复注册信号处理器——双注册会让两套清理竞速 `process.exit`，`server.close` 永远走不完 |
 | 2026-07-21 | 创建 | 初始化模块文档 |

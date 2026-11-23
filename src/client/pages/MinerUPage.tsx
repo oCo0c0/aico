@@ -5,6 +5,7 @@
  */
 
 import {useState, useEffect, useCallback, useRef} from 'react';
+import {usePageActiveRef} from '../hooks/usePageActive';
 import {useTranslation} from 'react-i18next';
 import {Joyride} from 'react-joyride';
 import {useGuide} from '../guides/useGuide';
@@ -139,6 +140,8 @@ export default function MinerUPage() {
     // 计时器
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
+    const isPageActive = usePageActiveRef((p) => p === '/mineru');
 
     useEffect(() => {
         return () => {
@@ -250,6 +253,7 @@ export default function MinerUPage() {
             setStatusText(t('mineru.statusQueued', {taskId: taskId.slice(0, 8)}));
 
             pollRef.current = setInterval(async () => {
+                if (!isPageActive()) return; // 非活跃页/隐藏标签页跳过本轮
                 try {
                     const statusRes = await fetch(`${API_BASE}/mineru/tasks/${taskId}`);
                     const statusData = await statusRes.json();

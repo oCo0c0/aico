@@ -66,6 +66,9 @@ mac:
   target:
     - dmg
   category: public.app-category.developer-tools
+  # 产物未签名：显式 identity:null 跳过 codesign（不设时 electron-builder 会
+  # 尝试找钥匙串证书，行为依版本而定）；正式分发前删掉本行并补签名/公证 CI
+  identity: null
 
 linux:
   target:

@@ -67,7 +67,7 @@ export function createMCPServersRoutes(mcpRegistryService: MCPRegistryService): 
             }
 
             // 校验 env 必须是字符串键值对象（如果提供）
-            let env: Record<string, string> = {};
+            const env: Record<string, string> = {};
             if (rawEnv !== undefined && rawEnv !== null) {
                 if (typeof rawEnv !== 'object' || Array.isArray(rawEnv)) {
                     res.status(400).json({code: 'VALIDATION_ERROR', message: 'env must be an object'});

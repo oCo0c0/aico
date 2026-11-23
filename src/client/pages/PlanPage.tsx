@@ -17,6 +17,7 @@
  * 实时日志通过全局状态管理（WebSocket推送）展示。
  */
 import {useState, useEffect, useRef, useCallback, useMemo} from 'react';
+import {usePageActiveRef} from '../hooks/usePageActive';
 import {useNavigate} from 'react-router-dom';
 import {useTranslation} from 'react-i18next';
 import {Joyride} from 'react-joyride';
@@ -174,7 +175,9 @@ export default function PlanPage() {
     const [exporting, setExporting] = useState(false);
 
     // ─── 引用 ───
-    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);      // 轮询定时器引用
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
+    const isPageActive = usePageActiveRef((p) => p.startsWith('/pipeline-run') || p === '/plan');      // 轮询定时器引用
     const replyInputRef = useRef<HTMLTextAreaElement>(null);                   // 回复输入框引用（用于焦点恢复）
 
     // 计算是否可以生成计划：需要已选择需求、已设置工作空间、且当前未在生成中
@@ -267,6 +270,7 @@ export default function PlanPage() {
         if (!activePlanId) return;
 
         const poll = async () => {
+            if (!isPageActive()) return; // 非活跃页/隐藏标签页跳过本轮
             try {
                 const result = await apiGet<StoredPlan>(`/plan/${activePlanId}`);
                 if (result.status === 'ready') {
@@ -566,6 +570,7 @@ export default function PlanPage() {
             // 由于activePlanId未改变，需要手动重启轮询机制
             if (pollRef.current) clearInterval(pollRef.current);
             const poll = async () => {
+                if (!isPageActive()) return; // 非活跃页跳过本轮
                 try {
                     const result = await apiGet<StoredPlan>(`/plan/${activePlanId}`);
                     if (result.status === 'ready') {

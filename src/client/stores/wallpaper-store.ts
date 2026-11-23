@@ -202,8 +202,8 @@ export const useWallpaperStore = create<WallpaperState>((set, get) => ({
         // 2. 服务端事实源合并（服务端为准）
         try {
             const [settingsRes, listRes] = await Promise.all([
-                fetch('/api/wallpapers/settings').then(r => r.json()),
-                fetch('/api/wallpapers').then(r => r.json()),
+                fetch('/api/wallpapers/settings').then(async (r) => (r.ok ? r.json() : null)),
+                fetch('/api/wallpapers').then(async (r) => (r.ok ? r.json() : null)),
             ]);
             const merged = mergeWallpaperSettings(defaultWallpaperSettings(), settingsRes ?? {});
             applyEffects(merged);

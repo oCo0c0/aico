@@ -202,31 +202,57 @@ export class WallpaperStoreService {
     // ── 上传 / 缩略图 ───────────────────────────────────────────────────────
 
     /**
-     * 保存上传的壁纸文件并登记元数据
-     * @param buffer     原始字节流（路由层以 octet-stream 收取）
-     * @param title      显示名（缺省用文件名）
-     * @param origName   原始文件名（推断类型与扩展名）
+     * 为流式上传准备临时文件路径。
+     * 路由层把请求体直接管道到这里（不经内存 Buffer），收尾后调
+     * {@link addFromStream} 改名登记。
+     */
+    tempUploadPath(): string {
+        this.ensureDirs();
+        return path.join(this.uploadsDir, `.incoming-${process.pid}-${Date.now()}.tmp`);
+    }
+
+    /**
+     * 登记一个已落盘的上传文件（流式上传收尾）
+     * @param tmpPath   tempUploadPath() 生成的临时文件（内部改名为正式存储名，失败时清理）
+     * @param size      实际接收的字节数（路由层边收边计数）
+     * @param title     显示名（缺省用文件名）
+     * @param origName  原始文件名（推断类型与扩展名）
      * @returns 新建的元数据
      */
-    add(buffer: Buffer, title: string | undefined, origName: string): WallpaperMeta {
+    addFromStream(tmpPath: string, size: number, title: string | undefined, origName: string): WallpaperMeta {
         this.ensureDirs();
         const ext = path.extname(origName || '').toLowerCase();
         const isImage = ext in IMAGE_EXT;
         const isVideo = ext in VIDEO_EXT;
         if (!isImage && !isVideo) {
+            try {
+                fs.rmSync(tmpPath, {force: true});
+            } catch { /* ignore */ }
             throw new Error(`不支持的文件格式：${ext || '(无扩展名)'}，仅支持 JPG/PNG/WEBP/MP4/WEBM`);
         }
-        if (buffer.length === 0) throw new Error('上传内容为空');
+        if (size === 0) {
+            try {
+                fs.rmSync(tmpPath, {force: true});
+            } catch { /* ignore */ }
+            throw new Error('上传内容为空');
+        }
         const id = `wp_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
         const fileName = `${id}${ext}`;
-        fs.writeFileSync(path.join(this.uploadsDir, fileName), buffer);
+        try {
+            fs.renameSync(tmpPath, path.join(this.uploadsDir, fileName));
+        } catch (err) {
+            try {
+                fs.rmSync(tmpPath, {force: true});
+            } catch { /* ignore */ }
+            throw err;
+        }
         const meta: WallpaperMeta = {
             id,
             title: (title && title.trim()) || path.basename(origName || fileName),
             type: isImage ? 'image' : 'video',
             fileName,
             mimeType: (isImage ? IMAGE_EXT : VIDEO_EXT)[ext],
-            size: buffer.length,
+            size,
             addedAt: new Date().toISOString(),
             hidden: false,
             hasThumb: false,
