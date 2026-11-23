@@ -53,4 +53,24 @@ contextBridge.exposeInMainWorld('adwDesktop', {
         ipcRenderer.on('adw:pet-input', handler);
         return () => ipcRenderer.removeListener('adw:pet-input', handler);
     },
+
+    /**
+     * 订阅自动更新状态推送（checking/available/downloading/downloaded/error）
+     * 主进程启动静默检查 + 6h 轮询；返回取消订阅函数
+     */
+    onUpdateState: (callback: (state: import('./update-support').UpdateState) => void): (() => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, state: import('./update-support').UpdateState): void => callback(state);
+        ipcRenderer.on('adw:update-state', handler);
+        return () => ipcRenderer.removeListener('adw:update-state', handler);
+    },
+
+    /** 手动触发检查更新（设置中心按钮驱动；结果同样经 onUpdateState 推送） */
+    checkForUpdate: (): void => {
+        ipcRenderer.send('adw:update-check');
+    },
+
+    /** 安装已下载的更新（退出并启动安装器；仅 downloaded 状态下主进程响应） */
+    installUpdate: (): void => {
+        ipcRenderer.send('adw:update-install');
+    },
 });

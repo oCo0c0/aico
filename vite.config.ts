@@ -1,8 +1,17 @@
 import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import {readFileSync} from 'fs';
+
+/** 从 package.json 读取版本号，注入前端 __APP_VERSION__（设置中心「版本与更新」展示用） */
+const {version} = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8')) as {version: string};
 
 export default defineConfig({
+    // __APP_VERSION__：编译期内联的应用版本（客户端代码不得 import package.json，
+    // 避免把整个包定义打进 bundle）
+    define: {
+        __APP_VERSION__: JSON.stringify(version),
+    },
     plugins: [react()],
     root: 'src/client',
     build: {

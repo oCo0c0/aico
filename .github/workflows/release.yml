@@ -90,6 +90,9 @@ jobs:
             release/*.dmg
             release/*.AppImage
             release/*.deb
+            # 自动更新清单与差量块（electron-updater 运行时从 Release 资产读取）
+            release/*.yml
+            release/*.blockmap
           if-no-files-found: error
 
   release:
@@ -119,6 +122,9 @@ jobs:
             artifacts/*.dmg
             artifacts/*.AppImage
             artifacts/*.deb
+            # 自动更新清单与差量块（缺了它们桌面版无法检测/下载更新）
+            artifacts/*.yml
+            artifacts/*.blockmap
             artifacts/SHA256SUMS.txt
           generate_release_notes: true
           draft: false

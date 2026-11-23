@@ -54,6 +54,7 @@ import WallpaperLayer from './wallpaper/WallpaperLayer';
 import {useWallpaperStore} from '../stores/wallpaper-store';
 import {FloatingSettingsPanel} from './quick-settings/FloatingSettingsPanel';
 import {MascotWidget} from './mascot/MascotWidget';
+import {UpdateNotice} from './UpdateNotice';
 import {WindowControls} from './WindowControls';
 
 /**
@@ -485,6 +486,9 @@ export default function Layout() {
 
             {/* 悬浮快捷设置面板（壁纸/外观/字体/吉祥物/效果/高级） */}
             <FloatingSettingsPanel/>
+
+            {/* 桌面版自动更新提示（下载进度/安装就绪，仅 Electron 环境渲染） */}
+            <UpdateNotice/>
 
             {/* 吉祥物：Web 端应用内右下角 Bongo Cat（桌面端另有独立悬浮窗） */}
             <MascotWidget/>

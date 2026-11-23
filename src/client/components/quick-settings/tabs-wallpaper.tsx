@@ -8,8 +8,9 @@
  * - 高级：倍速 / 水平翻转 / 画面适配 / 遮挡暂停三档。
  */
 import {useTranslation} from 'react-i18next';
-import {Film, Image as ImageIcon, Pause, Play, X} from 'lucide-react';
+import {Film, Image as ImageIcon, Pause, Play, RefreshCw, X} from 'lucide-react';
 import {cn} from '../../lib/utils';
+import {useDesktopUpdate} from '../../hooks/useDesktopUpdate';
 import {useWallpaperStore} from '../../stores/wallpaper-store';
 import {Vinyl} from '../wallpaper/Vinyl';
 import {Row, SectionTitle, SliderRow, Toggle} from './controls';
@@ -157,7 +158,7 @@ export function EffectsTab() {
     );
 }
 
-/** 高级页签：倍速 / 翻转 / 适配 / 遮挡暂停三档 */
+/** 高级页签：版本与更新 / 倍速 / 翻转 / 适配 / 遮挡暂停三档 */
 export function AdvancedTab() {
     const {t} = useTranslation();
     const settings = useWallpaperStore(s => s.settings);
@@ -169,6 +170,9 @@ export function AdvancedTab() {
 
     return (
         <div className="space-y-4">
+            {/* 版本与更新（仅桌面环境渲染；自动检查由主进程静默进行，这里提供手动入口） */}
+            <UpdateSection/>
+
             <section>
                 <SectionTitle title={t('settings.wallpaper.sectionPlayback')}/>
                 <div className="divide-y divide-border/40">
@@ -243,5 +247,62 @@ export function AdvancedTab() {
                 </div>
             </section>
         </div>
+    );
+}
+
+/**
+ * 「版本与更新」区（仅桌面环境渲染；Web 端无 window.adwDesktop 直接跳过）
+ *
+ * 展示当前版本（构建期由 vite define 注入 __APP_VERSION__）+ 手动检查按钮 +
+ * 状态行。自动检查/下载由主进程静默完成（UpdateNotice 负责打扰式提示），
+ * 这里只做「用户主动想看看有没有新版」的入口与结果反馈。
+ */
+function UpdateSection() {
+    const {t} = useTranslation();
+    const {state, isDesktop, isManualCheck, check, install} = useDesktopUpdate();
+    if (!isDesktop) return null;
+
+    // 状态行文案：优先展示明确状态，checking 时区分手动/自动
+    const statusText = (() => {
+        switch (state.status) {
+            case 'checking': return t(isManualCheck ? 'update.checking' : 'update.autoChecking');
+            case 'downloading': return t('update.downloading', {percent: state.percent ?? 0});
+            case 'downloaded': return t('update.downloaded', {version: state.version ?? ''});
+            case 'available': return t('update.available', {version: state.version ?? ''});
+            case 'error': return t('update.errorShort', {message: state.message ?? ''});
+            default: return t('update.upToDate');
+        }
+    })();
+
+    return (
+        <section>
+            <SectionTitle title={t('update.sectionTitle')} desc={t('update.sectionDesc')}/>
+            <div className="divide-y divide-border/40">
+                <Row label={t('update.currentVersion', {version: __APP_VERSION__})}>
+                    {state.status === 'downloaded' ? (
+                        <button
+                            type="button"
+                            className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                            onClick={install}
+                        >
+                            {t('update.installNow')}
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            disabled={state.status === 'checking' || state.status === 'downloading'}
+                            className="flex items-center gap-1.5 rounded-lg border border-border/60 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={check}
+                        >
+                            <RefreshCw className={cn('h-3.5 w-3.5', state.status === 'checking' && 'animate-spin')}/>
+                            {t('update.check')}
+                        </button>
+                    )}
+                </Row>
+                <Row label={t('update.status')}>
+                    <span className="max-w-[220px] break-all text-right text-xs text-muted-foreground">{statusText}</span>
+                </Row>
+            </div>
+        </section>
     );
 }

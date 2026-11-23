@@ -21,6 +21,7 @@ import {fixPath} from './fix-path';
 import {buildServerStdio} from './server-stdio';
 import {overlayColorsFor} from './titlebar-theme';
 import {loadCloseBehavior, saveCloseBehavior} from './tray-settings';
+import {setupUpdater} from './updater';
 import {findAvailablePort} from '../cli/port-finder';
 import {APP_DATA_DIR} from '../shared/app-data-dir';
 
@@ -429,6 +430,8 @@ if (!gotLock) {
             settingsDir = app.getPath('userData');
             createWindow(url);
             createTray();
+            // 自动更新（electron-updater + GitHub Releases；不支持的环境内部 no-op）
+            setupUpdater({getWindow: () => win});
 
             app.on('activate', () => {
                 // macOS Dock 点击：窗口已存在（含隐藏到托盘）→ 恢复；否则新建

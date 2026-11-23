@@ -26,10 +26,15 @@ directories:
 
 asar: false
 compression: maximum
-# 禁用 electron-builder 内置 GitHub 发布（发布由 CI 工作流的 release job 统一做）。
-# 注意：CI 构建步骤注入了 GH_TOKEN（用于认证下载提高限额），不加此配置
-# 它会因 token+tag 触发自动发布，把整个应用目录当成发布物传上去
-publish: null
+# GitHub Releases 作为自动更新通道：打包时按此配置生成 app-update.yml 内置于应用
+# （运行时 electron-updater 读取，见 src/electron/updater.ts），并产出 latest*.yml
+# / *.blockmap 更新清单随安装包一起上传。注意：CI 构建步骤显式 --publish never
+# （发布统一由 release job 上传），本地构建无 GH_TOKEN 也不会触发上传——此配置
+# 只影响「生成更新清单 + 内置 app-update.yml」，不会自行发布任何东西
+publish:
+  provider: github
+  owner: oCo0c0
+  repo: aico
 
 files:
   - dist/**
