@@ -10,14 +10,14 @@
  * - 全局初始化：启动 WebSocket 连接、注册键盘快捷键
  */
 
-import {Suspense, lazy, useEffect, useState, type ComponentType} from 'react';
+import {Suspense, lazy, useEffect, useMemo, useState, type ComponentType, type ReactNode} from 'react';
 import {NavLink, Navigate, useLocation} from 'react-router-dom';
 import {useTranslation} from 'react-i18next';
 import {useAppStore, syncUiPreferences} from '../stores/app-store';
 import {useKeyboardShortcuts} from '../hooks/useKeyboardShortcuts';
 import {useWebSocket} from '../hooks/useWebSocket';
 import {useResizableWidth, ResizeHandle} from '../hooks/useResizableWidth';
-import {ActivePagePathnameContext} from '../hooks/usePageActive';
+import {PageActiveContext} from '../hooks/usePageActive';
 import SetupWizard from './SetupWizard';
 import {cn} from '../lib/utils';
 // 页面按路由级懒加载：首访才拉对应 chunk，主包不再包含全部 9 个页面
@@ -80,6 +80,21 @@ const REDIRECTS: Record<string, string> = {
     '/skills': '/settings/skills',
     '/model-providers': '/settings/model-providers',
 };
+
+/**
+ * 首访页面 chunk 加载期间的骨架占位（替代裸文本 "Loading…"，避免硬切空白闪屏）。
+ */
+function PageLoadFallback() {
+    return (
+        <div className="flex-1 flex items-center justify-center p-8">
+            <div className="w-full max-w-md space-y-3 animate-pulse" aria-hidden>
+                <div className="h-7 w-1/3 rounded-lg bg-accent/70"/>
+                <div className="h-24 rounded-xl bg-accent/50"/>
+                <div className="h-40 rounded-xl bg-accent/35"/>
+            </div>
+        </div>
+    );
+}
 
 /**
  * 侧边栏导航菜单项配置数组
@@ -166,6 +181,20 @@ export default function Layout() {
             return merged;
         });
     }, [location.pathname]);
+
+    // 每页的懒加载元素只构建一次：组件引用恒定（模块级 lazy），元素引用稳定让
+    // Layout 因导航/顶栏状态 re-render 时 React bail out，不再全量重渲染 9 个常驻页
+    const pageContents = useMemo(() => {
+        const map = new Map<string, ReactNode>();
+        for (const {key, component: Page} of KEEP_ALIVE_PAGES) {
+            map.set(key, (
+                <Suspense fallback={<PageLoadFallback/>}>
+                    <Page/>
+                </Suspense>
+            ));
+        }
+        return map;
+    }, []);
 
     useWebSocket();
     useKeyboardShortcuts();
@@ -436,34 +465,35 @@ export default function Layout() {
                     与滚动位置；旧路由重定向在组件树顶部处理。
                     首访挂载：未访问过的页面不挂载也不拉 chunk（配合路由级 lazy，
                     首屏只加载当前页）；访问过即常驻，keep-alive 语义不变。
-                    活跃路由经 Context 广播，供各页轮询做暂停判定。 */}
+                    性能：每页的 <Page/> 元素只构建一次（useMemo），Layout 因导航
+                    re-render 时子树元素引用不变 → React 直接跳过未受影响页面的
+                    reconciler（此前 9 个常驻页每次切 tab 全量重渲染一遍）。
+                    活跃布尔值经每页独立的 PageActiveContext.Provider 广播（供各页
+                    轮询做暂停判定）——值只在切进/切出该页时变化，不影响其它页。
+                    激活页加 .page-pane-active 轻量淡入，软化 visibility 硬切。 */}
                 <div className="relative flex-1 min-h-0">
-                    <ActivePagePathnameContext.Provider value={location.pathname}>
-                        {KEEP_ALIVE_PAGES.map(({key, match, component: Page}) => {
-                            const active = match(location.pathname);
-                            if (!mountedKeys.has(key)) return null;
-                            return (
-                                <div
-                                    key={key}
-                                    className="absolute inset-0 flex flex-col overflow-hidden"
-                                    style={{
-                                        visibility: active ? 'visible' : 'hidden',
-                                        pointerEvents: active ? 'auto' : 'none'
-                                    }}
-                                    aria-hidden={!active}
-                                >
-                                    <Suspense fallback={
-                                        <div
-                                            className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-                                            Loading…
-                                        </div>
-                                    }>
-                                        <Page/>
-                                    </Suspense>
-                                </div>
-                            );
-                        })}
-                    </ActivePagePathnameContext.Provider>
+                    {KEEP_ALIVE_PAGES.map(({key, match}) => {
+                        const active = match(location.pathname);
+                        if (!mountedKeys.has(key)) return null;
+                        return (
+                            <div
+                                key={key}
+                                className={cn(
+                                    'absolute inset-0 flex flex-col overflow-hidden',
+                                    active && 'page-pane-active',
+                                )}
+                                style={{
+                                    visibility: active ? 'visible' : 'hidden',
+                                    pointerEvents: active ? 'auto' : 'none'
+                                }}
+                                aria-hidden={!active}
+                            >
+                                <PageActiveContext.Provider value={active}>
+                                    {pageContents.get(key)}
+                                </PageActiveContext.Provider>
+                            </div>
+                        );
+                    })}
                 </div>
             </div>
 

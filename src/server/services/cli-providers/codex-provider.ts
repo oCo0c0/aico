@@ -14,6 +14,7 @@ import os from 'os';
 import {getErrorMessage} from '../../utils/error-utils.js';
 import {extractDescription, inferServerType} from '../../utils/markdown-utils.js';
 import {ModelProviderStore} from '../model-provider-store.js';
+import {mergeOwnModelsIntoTiers} from './model-options.js';
 import {isolatedPath, isolationEnv} from '../cli-isolation.js';
 import type {
     CLIProvider,
@@ -255,20 +256,32 @@ export class CodexProvider implements CLIProvider {
     private threadIdToSessionId = new Map<string, string>();
 
     /**
-     * 读取本地可提供的模型选项：从 ~/.codex/config.toml 解析当前配置的模型
-     * （顶层 model = "xxx" 字段）
+     * 读取本地可提供的模型选项：
+     * 1. 从隔离 config.toml 解析当前配置的模型（顶层 model = "xxx" 字段），置前；
+     * 2. 合并自有模型供应商配置（~/.aico/models.json 的 codex 记录）中的模型，
+     *    使「模型供应商」页添加的模型出现在下拉中（与 claude Provider 同款合并逻辑）。
+     *    current 先入列保证 store 的档位校正不会把用户 config.toml 的模型覆盖掉。
      */
     async loadModelOptions(): Promise<CLIProviderModelOptions> {
+        let current: string | null = null;
         try {
-            if (!fs.existsSync(CODEX_CONFIG_FILE)) return {current: null};
-            const raw = fs.readFileSync(CODEX_CONFIG_FILE, 'utf-8');
-            // 简单解析顶层 model = "xxx"（在第一个 [section] 之前）
-            const sectionIdx = raw.indexOf('\n[');
-            const head = sectionIdx >= 0 ? raw.slice(0, sectionIdx) : raw;
-            const match = head.match(/^model\s*=\s*"([^"]+)"/m);
-            return {current: match ? match[1] : null};
+            if (fs.existsSync(CODEX_CONFIG_FILE)) {
+                const raw = fs.readFileSync(CODEX_CONFIG_FILE, 'utf-8');
+                // 简单解析顶层 model = "xxx"（在第一个 [section] 之前）
+                const sectionIdx = raw.indexOf('\n[');
+                const head = sectionIdx >= 0 ? raw.slice(0, sectionIdx) : raw;
+                const match = head.match(/^model\s*=\s*"([^"]+)"/m);
+                current = match ? match[1] : null;
+            }
         } catch { /* ignore */ }
-        return {current: null};
+
+        const tiers: Array<{value: string; label: string; model: string}> = [];
+        if (current) tiers.push({value: current, label: current, model: current});
+        try {
+            const rec = new ModelProviderStore().get('codex');
+            return {current, tiers: mergeOwnModelsIntoTiers(tiers, rec)};
+        } catch { /* 自有配置读取失败时仅返回当前模型 */ }
+        return {tiers};
     }
 
     async detect(): Promise<CLIProviderStatus> {

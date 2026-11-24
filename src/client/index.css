@@ -758,3 +758,24 @@ body.pet-window #root {
     color: hsl(var(--foreground) / 0.85);
     font-weight: 600;
 }
+
+/* ── keep-alive 页面切换淡入 ──
+   Layout 的常驻页切换是 visibility 硬切（DOM 不卸载、滚动位置保留），
+   激活页加本类做 200ms 透明度淡入软化观感。
+   注意只用 opacity：transform 会创建 containing block，让页面内
+   position:fixed 的弹层/浮层在动画期间错位。类名常驻（非动画期间也不移除），
+   切换激活沿时 animation 自动重触发，无需 JS 参与。 */
+@keyframes page-pane-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.page-pane-active {
+    animation: page-pane-in 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .page-pane-active {
+        animation: none;
+    }
+}

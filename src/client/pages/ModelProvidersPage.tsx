@@ -98,6 +98,9 @@ export default function ModelProvidersPage() {
     const {t} = useTranslation();
     // pi 引擎的原生检测结果（启动时 detect 拉取）：供应商/凭证由 pi 体系自管
     const piMeta = useAppStore((s) => s.piMeta);
+    // 保存/删除后同步刷新全局 Provider 目录与档位缓存：新加的模型在模型选择器/顶栏即时可见
+    const refreshProviderCatalog = useAppStore((s) => s.refreshProviderCatalog);
+    const fetchAvailableModels = useAppStore((s) => s.fetchAvailableModels);
 
     // 列表状态（外部配置导入已移除：CLI 侧配置由各引擎隔离层首次使用时播种）
     const [providers, setProviders] = useState<SafeModelProviderRecord[]>([]);
@@ -131,12 +134,16 @@ export default function ModelProvidersPage() {
             const data = await apiGet<ModelProvidersListResponse>('/model-providers');
             setProviders(data.providers);
             setConfigFile(data.file);
+            // 同步刷新全局 Provider 目录与档位/模型列表：此前 providerCatalog 只在应用启动
+            // 拉一次，这里保存的新模型对模型选择器不可见直到刷新页面
+            await refreshProviderCatalog();
+            await fetchAvailableModels();
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to fetch providers');
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [refreshProviderCatalog, fetchAvailableModels]);
 
     // 首次加载：拉取供应商列表（不再检测/导入外部 CLI 配置）
     useEffect(() => {

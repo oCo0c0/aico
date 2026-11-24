@@ -213,7 +213,7 @@ export default function AgentExecutionPage() {
     // DOM 引用
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
-    const isPageActive = usePageActiveRef((p) => p === '/agent-execution');
+    const isPageActive = usePageActiveRef();
     // 本次任务期间是否见到过运行中状态（ref 跨 effect 重建保持，局部变量会因依赖抖动被重置）
     const sawRunningRef = useRef(false);
 
@@ -266,6 +266,12 @@ export default function AgentExecutionPage() {
         }
     }, []);
 
+    // 需求在其它页面更新（agent 拉取落盘/保存）时刷新已保存需求列表：
+    // keep-alive 常驻页不会重新挂载，新保存的需求要即时进入新建任务弹窗的下拉
+    useEffect(() => onWsEvent('requirement:updated', () => {
+        void loadSavedRequirements();
+    }), [loadSavedRequirements]);
+
     const loadDetail = useCallback(async (id: string) => {
         try {
             const data = await apiGet<AgentExecutionDetail>(`/agent-execution/${id}/detail`);
@@ -309,6 +315,10 @@ export default function AgentExecutionPage() {
         setManualWorkspacePath('');
         if (presetWorkspacePath) setWorkspacePath(presetWorkspacePath);
         setShowCreateDialog(true);
+        // 打开即刷新：keep-alive 常驻页的需求/工作区列表只在首次挂载拉过一次，
+        // 用户在需求页新保存的需求要即时出现在「已保存需求」下拉里
+        void loadSavedRequirements();
+        void loadWorkspaceHistory();
         // 延迟调用 showModal，确保 DOM 已渲染
         requestAnimationFrame(() => dialogRef.current?.showModal());
     };

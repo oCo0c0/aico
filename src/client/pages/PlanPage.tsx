@@ -177,7 +177,7 @@ export default function PlanPage() {
     // ─── 引用 ───
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
-    const isPageActive = usePageActiveRef((p) => p.startsWith('/pipeline-run') || p === '/plan');      // 轮询定时器引用
+    const isPageActive = usePageActiveRef();      // 轮询定时器引用
     const replyInputRef = useRef<HTMLTextAreaElement>(null);                   // 回复输入框引用（用于焦点恢复）
 
     // 计算是否可以生成计划：需要已选择需求、已设置工作空间、且当前未在生成中

@@ -276,7 +276,7 @@ export default function TestsPage() {
     const [showRawOutput, setShowRawOutput] = useState(false);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
-    const isPageActive = usePageActiveRef((p) => p === '/tests');
+    const isPageActive = usePageActiveRef();
 
     // === 执行上下文关联状态 ===
     const [linkedExecution, setLinkedExecution] = useState<ExecutionSummary | null>(null);

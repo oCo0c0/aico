@@ -141,7 +141,7 @@ export default function MinerUPage() {
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
-    const isPageActive = usePageActiveRef((p) => p === '/mineru');
+    const isPageActive = usePageActiveRef();
 
     useEffect(() => {
         return () => {

@@ -16,7 +16,7 @@
 
 import {create} from 'zustand';
 import type {AgentExecutionSummary} from '../types/agent-types';
-import {apiPut} from '../api';
+import {apiGet, apiPut} from '../api';
 import {applyAccent, applyCodeTheme, applyFontColorPatch, applyGlassColor, CODE_THEME_PRESETS, type AccentPair} from '../lib/appearance';
 
 // === 数据模型接口定义 ===
@@ -606,6 +606,8 @@ interface AppState {
     fetchAvailableModels: () => Promise<void>;
     /** 保存 pi 检测到的元数据 */
     setPiMeta: (meta: AppState['piMeta']) => void;
+    /** 重新拉取 Provider 目录与 pi 元数据（供应商配置页保存/删除后调用，模型选择器即时可见） */
+    refreshProviderCatalog: () => Promise<void>;
 
     // 项目空间 actions
     /** 设置项目空间列表 */
@@ -1360,6 +1362,48 @@ export const useAppStore = create<AppState>((set, get) => {
             }
         },
         setPiMeta: (meta) => set({piMeta: meta}),
+
+        /**
+         * 重新拉取 Provider 目录与 pi 元数据。
+         * 此前目录只在应用启动时（main.tsx）拉一次，供应商配置页新增的模型
+         * 对模型选择器不可见直到刷新页面——现在保存/删除后也走这里即时刷新。
+         */
+        refreshProviderCatalog: async () => {
+            try {
+                const data = await apiGet<{
+                    detected?: Array<{
+                        id: string;
+                        label: string;
+                        available: boolean;
+                        capabilities?: Record<string, unknown>;
+                        defaultModelSettings?: Record<string, unknown>;
+                        meta?: Record<string, unknown>;
+                    }>;
+                }>('/system/cli-provider/status');
+                if (!data.detected) return;
+                set({
+                    providerCatalog: data.detected.map((d) => ({
+                        id: d.id,
+                        label: d.label,
+                        available: d.available,
+                        capabilities: d.capabilities as never,
+                        defaultModelSettings: d.defaultModelSettings as never,
+                        meta: d.meta,
+                    })),
+                });
+                const piDetected = data.detected.find((d) => d.id === 'pi');
+                if (piDetected?.meta) {
+                    set({
+                        piMeta: {
+                            availableProviders: (piDetected.meta.availableProviders as string[]) || [],
+                            availableModels: (piDetected.meta.availableModels as Array<{ provider: string; id: string; name: string }>) || [],
+                        },
+                    });
+                }
+            } catch (err) {
+                console.error('Failed to refresh provider catalog:', err);
+            }
+        },
 
         fetchAvailableModels: async () => {
             try {

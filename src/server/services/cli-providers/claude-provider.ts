@@ -20,6 +20,7 @@ import {getErrorMessage} from '../../utils/error-utils.js';
 import {extractDescription} from '../../utils/markdown-utils.js';
 import {findSkillMdFile} from '../../utils/skill-utils.js';
 import {ModelProviderStore} from '../model-provider-store.js';
+import {mergeOwnModelsIntoTiers} from './model-options.js';
 import {isolatedPath, isolationEnv, ensureSessionMigrated} from '../cli-isolation.js';
 import {resolveClaudePermission} from '../permission-mapping.js';
 import type {
@@ -134,37 +135,10 @@ function loadOwnClaudeEnv(): Record<string, string> {
 
 /**
  * 将自有模型供应商配置（models.json 的 claude 记录）中的模型合并进档位下拉。
- *
- * settings.json 档位（haiku/sonnet/opus 别名）保持原样置前；记录里的 models 追加在后，
- * value=label=model=具体模型名（SDK 的 model 参数可直接解析，运行时经 params.model 下发）。
- * defaultModel 置顶；与档位实际模型重名或列表内重复的项跳过。
- *
- * @returns 新的 tiers 数组（不修改入参）
+ * 实现抽到 `./model-options.ts` 与 codex Provider 共用；此处 re-export
+ * 保持既有测试与外部引用路径不变。
  */
-export function mergeOwnModelsIntoTiers(
-    tiers: Array<{value: string; label: string; model: string}>,
-    record: {models?: string[]; defaultModel?: string} | undefined | null,
-): Array<{value: string; label: string; model: string}> {
-    if (!record || (record.models === undefined && !record.defaultModel)) return tiers;
-    const result = [...tiers];
-    const known = new Set(result.map((t) => t.model));
-    const seen = new Set<string>();
-
-    // defaultModel 置顶
-    const models = [...(record.models ?? [])];
-    if (record.defaultModel) {
-        const idx = models.indexOf(record.defaultModel);
-        if (idx > 0) models.splice(idx, 1);
-        if (idx !== 0) models.unshift(record.defaultModel);
-    }
-
-    for (const m of models) {
-        if (!m || seen.has(m) || known.has(m) || result.some((t) => t.value === m)) continue;
-        seen.add(m);
-        result.push({value: m, label: m, model: m});
-    }
-    return result;
-}
+export {mergeOwnModelsIntoTiers} from './model-options.js';
 
 /** 待处理请求的内部数据结构 */
 interface PendingRequest {

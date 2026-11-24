@@ -50,10 +50,11 @@ export function ModelPicker() {
         return () => document.removeEventListener('mousedown', handler);
     }, [open]);
 
-    // 首次打开时若当前引擎尚无档位数据则拉取一次
+    // 每次打开都重新拉取档位/模型列表：后端实时读 models.json，供应商页新增的模型
+    // 即时可见（此前只在无缓存时拉一次，拉过之后新增模型永远不出现在下拉里）
     useEffect(() => {
-        if (open && !availableModels[active]) void fetchAvailableModels();
-    }, [open, active, availableModels, fetchAvailableModels]);
+        if (open) void fetchAvailableModels();
+    }, [open, fetchAvailableModels]);
 
     const entry = providerCatalog.find(p => p.id === active);
     const config = modelConfig[active] ?? {};

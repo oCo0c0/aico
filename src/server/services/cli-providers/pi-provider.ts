@@ -88,7 +88,7 @@ function readCliAuth(): Record<string, unknown> {
  *
  * @returns 本次凭据来源，便于日志定位
  */
-export function syncIsolatedPiAuth(): {source: 'app' | 'cli' | 'empty'; file: string} {
+export function syncIsolatedPiAuth(): { source: 'app' | 'cli' | 'empty'; file: string } {
     const file = path.join(PI_AGENT_DIR, 'auth.json');
     // 目录创建失败要带着路径抛出：否则后续写入只会报无指向性的 ENOENT
     if (!existsSync(PI_AGENT_DIR)) {
@@ -99,12 +99,13 @@ export function syncIsolatedPiAuth(): {source: 'app' | 'cli' | 'empty'; file: st
         }
     }
 
-    let records: Array<{id: string; apiKey?: string; env?: Record<string, string>}> = [];
+    let records: Array<{ id: string; apiKey?: string; env?: Record<string, string> }> = [];
     try {
         records = new ModelProviderStore()
             .list()
             .filter((r) => r.kind === 'pi' && r.enabled && r.apiKey);
-    } catch { /* 读取失败按「无记录」处理，镜像 CLI */ }
+    } catch { /* 读取失败按「无记录」处理，镜像 CLI */
+    }
 
     if (records.length > 0) {
         const auth: Record<string, unknown> = {};
@@ -183,7 +184,7 @@ export const PI_BUILTIN_TOOLS = ['read', 'bash', 'edit', 'write', 'grep', 'find'
 export function ensurePiDefaultTools(
     targetDir: string = PI_AGENT_DIR,
     tools: readonly string[] = PI_BUILTIN_TOOLS,
-): {changed: boolean; tools: string[]; file: string} {
+): { changed: boolean; tools: string[]; file: string } {
     const file = path.join(targetDir, 'settings.json');
     let settings: Record<string, unknown> = {};
     if (existsSync(file)) {
@@ -192,7 +193,8 @@ export function ensurePiDefaultTools(
             if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
                 settings = parsed as Record<string, unknown>;
             }
-        } catch { /* 内容损坏：以空配置重建（只补 defaultTools，不猜用户意图） */ }
+        } catch { /* 内容损坏：以空配置重建（只补 defaultTools，不猜用户意图） */
+        }
     }
 
     const current = Array.isArray(settings.defaultTools)
@@ -257,7 +259,8 @@ export function seedIsolatedPiAgentHome(
             mkdirSync(path.dirname(dest), {recursive: true});
             copyFileSync(src, dest);
             copied.push(rel);
-        } catch { /* 单个条目失败不影响其它 */ }
+        } catch { /* 单个条目失败不影响其它 */
+        }
     };
 
     // 单文件：settings.json / trust.json
@@ -272,7 +275,8 @@ export function seedIsolatedPiAgentHome(
                 if (!entry.isFile()) continue;
                 copyFileIfMissing(path.join('bin', entry.name));
             }
-        } catch { /* 列目录失败按无 bin 处理 */ }
+        } catch { /* 列目录失败按无 bin 处理 */
+        }
     }
     return copied;
 }
@@ -324,7 +328,7 @@ function legacyPiSessionDir(cwd: string): string {
 export function resolvePiSessionFile(
     sessionId: string,
     cwd: string,
-): {file?: string; dir: string; via?: 'cwd' | 'legacy' | 'global'} {
+): { file?: string; dir: string; via?: 'cwd' | 'legacy' | 'global' } {
     const primary = piSessionDir(cwd);
     const direct = findSessionFile(sessionId, primary);
     if (direct) return {file: direct, dir: primary, via: 'cwd'};
@@ -343,7 +347,8 @@ export function resolvePiSessionFile(
             const hit = findSessionFile(sessionId, dir);
             if (hit) return {file: hit, dir, via: 'global'};
         }
-    } catch { /* 扫描失败按未找到处理 */ }
+    } catch { /* 扫描失败按未找到处理 */
+    }
     return {dir: primary};
 }
 
@@ -501,7 +506,8 @@ export class PiProvider implements CLIProvider {
         if (models) {
             const providers = new Set(models.map((m) => m.provider));
             meta.availableProviders = Array.from(providers);
-            meta.availableModels = models.slice(0, 30);
+            // 原生检测清单已在 detectAvailableModels 内截前 30，models.json 自定义模型追加其后全量保留
+            meta.availableModels = models;
         }
 
         return {
@@ -546,17 +552,24 @@ export class PiProvider implements CLIProvider {
             const data = await proc.send({type: 'get_available_models'}, 20_000) as
                 | { models?: Array<{ provider: string; id: string; name?: string }> }
                 | undefined;
-            const models = (data?.models ?? []).map((m) => ({provider: m.provider, id: m.id, name: m.name ?? m.id}));
+            const native = (data?.models ?? []).map((m) => ({provider: m.provider, id: m.id, name: m.name ?? m.id}));
+            // 原生检测清单截前 30 个防膨胀（截断在合并自定义模型之前，保证 models.json 新增模型不被截掉）
+            const models = native.slice(0, 30);
 
-            // 合并自有模型供应商配置（pi:* 记录经环境变量注入凭证，pi 侧自动检测看不到）
+            // 合并自有模型供应商配置（pi:* 记录经环境变量注入凭证，pi 侧自动检测看不到）：
+            // rec.models 全量并入（此前只并 defaultModel/首个，供应商页新加的模型不出现在下拉里）
             try {
                 const store = new ModelProviderStore();
                 for (const rec of store.list()) {
-                    if (rec.kind !== 'pi' || !rec.enabled || !rec.apiKey) continue;
+                    if (rec.kind !== 'pi' || !rec.enabled) continue;
                     const providerId = rec.id.startsWith('pi:') ? rec.id.slice(3) : rec.id;
-                    if (models.some((m) => m.provider === providerId)) continue;
-                    const modelId = rec.defaultModel || rec.models?.[0];
-                    if (modelId) models.push({provider: providerId, id: modelId, name: modelId});
+                    const known = new Set(models.filter((m) => m.provider === providerId).map((m) => m.id));
+                    const customModels = rec.models?.length ? rec.models : rec.defaultModel ? [rec.defaultModel] : [];
+                    for (const modelId of customModels) {
+                        if (known.has(modelId)) continue;
+                        known.add(modelId);
+                        models.push({provider: providerId, id: modelId, name: modelId});
+                    }
                 }
             } catch {
                 // 自有配置读取失败时静默降级

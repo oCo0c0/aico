@@ -158,7 +158,7 @@ export default function ExecutionPage() {
     // DOM 引用：用于轮询清理和回复输入框聚焦
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
-    const isPageActive = usePageActiveRef((p) => p.startsWith('/pipeline-run') || p === '/execution');
+    const isPageActive = usePageActiveRef();
     // 当前执行的已知全量日志（增量累积）：首次 logsFrom=0 全量，之后只拉新增段拼接，
     // 修复「刷新后只剩服务端尾部 200 条」的截断（与 ExecutionPanel 同一机制）
     const fullLogsRef = useRef<string[] | null>(null);

@@ -168,7 +168,7 @@ const PlanPanel = forwardRef<PanelHandle, PlanPanelProps>(function PlanPanel(
     // ─── 引用 ───
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     // 页面活跃判定（ref 语义）：keep-alive 隐藏页/隐藏标签页暂停后台轮询
-    const isPageActive = usePageActiveRef((p) => p.startsWith('/pipeline-run') || p === '/plan');      // 轮询定时器引用
+    const isPageActive = usePageActiveRef();      // 轮询定时器引用
 
     // 对外暴露 send()：共用输入框发送时调用（原内置输入框的 onSend 逻辑）
     useImperativeHandle(ref, () => ({
