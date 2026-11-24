@@ -14,7 +14,7 @@
  */
 
 import {app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, Tray} from 'electron';
-import {ChildProcess, spawn, type StdioOptions} from 'child_process';
+import {ChildProcess, execSync, spawn, type StdioOptions} from 'child_process';
 import http from 'http';
 import path from 'path';
 import {fixPath} from './fix-path';
@@ -431,7 +431,27 @@ if (!gotLock) {
             createWindow(url);
             createTray();
             // 自动更新（electron-updater + GitHub Releases；不支持的环境内部 no-op）
-            setupUpdater({getWindow: () => win});
+            setupUpdater({
+                getWindow: () => win,
+                beforeInstall: () => {
+                    // quitAndInstall 先拉起 NSIS 安装器再退出应用，而 will-quit 的优雅
+                    // 关闭握手最长要 5 秒——安装器抢先检测到存活进程就弹「无法关闭」。
+                    // 且服务端子进程与 pi RPC 孙进程都是 aico.exe（ELECTRON_RUN_AS_NODE），
+                    // 对 NSIS 而言都是「Aico 在运行」。安装路径不等握手：Windows 下整棵
+                    // 进程树强杀（/T 连带 bridge/MCP/pi 孙进程），应用随后毫秒级退出。
+                    // 正常退出路径（关窗/托盘退出）的优雅握手不受影响。
+                    if (
+                        process.platform === 'win32'
+                        && serverProc?.pid
+                        && serverProc.exitCode === null
+                    ) {
+                        try {
+                            execSync(`taskkill /F /T /PID ${serverProc.pid}`, {stdio: 'ignore', timeout: 5000});
+                        } catch { /* 进程树已退出等 */ }
+                        serverProc = null;
+                    }
+                },
+            });
 
             app.on('activate', () => {
                 // macOS Dock 点击：窗口已存在（含隐藏到托盘）→ 恢复；否则新建

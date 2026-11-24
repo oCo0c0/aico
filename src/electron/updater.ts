@@ -50,8 +50,15 @@ async function checkNow(getWindow: () => BrowserWindow | null): Promise<void> {
  *
  * @param opts.getWindow - 主窗口获取器（状态推送给主窗口渲染层）
  * @param opts.isDev - 开发模式覆盖（默认取 !app.isPackaged）
+ * @param opts.beforeInstall - 立即安装前的同步回调。quitAndInstall 会**先拉起
+ *   NSIS 安装器再退出应用**，而 will-quit 的优雅关闭握手最长要 5 秒；宿主在此
+ *   回调里先把服务端进程树杀干净，避免安装器检测到存活进程弹「无法关闭」。
  */
-export function setupUpdater(opts: {getWindow: () => BrowserWindow | null; isDev?: boolean}): void {
+export function setupUpdater(opts: {
+    getWindow: () => BrowserWindow | null;
+    isDev?: boolean;
+    beforeInstall?: () => void;
+}): void {
     const isDev = opts.isDev ?? !app.isPackaged;
     const isPortable = Boolean(process.env.PORTABLE_EXECUTABLE_DIR);
     if (
@@ -82,8 +89,9 @@ export function setupUpdater(opts: {getWindow: () => BrowserWindow | null; isDev
     ipcMain.on('adw:update-install', () => {
         // 只在下载完成后响应；尚未就绪时忽略（前端按钮本就只在 downloaded 态出现）
         if (lastState?.status !== 'downloaded') return;
-        // 退出并安装：走 app.quit 级联（will-quit 的服务端清理握手照常执行）
-        autoUpdater.quitAndInstall();
+        // 安装前清场（杀服务端进程树，防 NSIS「无法关闭」弹窗），退出并安装、装完自启
+        opts.beforeInstall?.();
+        autoUpdater.quitAndInstall(false, true);
     });
 
     // 启动延迟首查 + 定时轮询（定时器与主进程同寿，无需清理）
