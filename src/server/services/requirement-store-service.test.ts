@@ -51,7 +51,9 @@ describe('RequirementStoreService 路径安全', () => {
     it.each([
         '../outside',
         '../../..',
-        '..\\..\\win-escape',
+        // 反斜杠分隔符仅在 Windows 上构成真实路径遍历（POSIX 下 '\' 是合法文件名字符，
+        // 该 id 解析后仍在根目录内、不抛错是正确行为）——CI 在 ubuntu 上跑，此用例按平台启用
+        ...(process.platform === 'win32' ? ['..\\..\\win-escape'] : []),
         'sub/../../escape',
         // 注：'..%2F..%2F' 字面量不含真实分隔符，只有经路由 URL 解码后才恶意，
         // 解码后的形态即 '../../' 已由上表覆盖
