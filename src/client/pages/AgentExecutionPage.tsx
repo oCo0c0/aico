@@ -46,6 +46,7 @@ import {
     FileText,
     Bot,
     Plus,
+    FolderMinus,
     FolderPlus,
     PanelRightOpen,
 } from 'lucide-react';
@@ -311,6 +312,20 @@ export default function AgentExecutionPage() {
             // 失败时给出可见反馈（此前只在 console，界面上看起来像"点了没反应"）
             setWsNotice(err instanceof Error ? err.message : '添加工作空间失败');
             setTimeout(() => setWsNotice(null), 5000);
+        }
+    };
+
+    /** 移除已保存工作区（仅收藏项可移除；执行记录不受影响，历史派生组无移除按钮） */
+    const handleRemoveWorkspace = async (groupPath: string) => {
+        const saved = savedWorkspaces.find(ws => ws.path === groupPath);
+        if (!saved) return;
+        if (!confirm(`移除已保存工作区「${saved.name || groupPath}」？\n（只从收藏移除，执行记录不会被删除）`)) return;
+        try {
+            await apiDelete(`/workspace/saved/${saved.id}`);
+            await loadWorkspaceHistory();
+        } catch (err) {
+            console.error('[AgentExec] 移除工作区失败:', err);
+            notifyError(`移除失败：${err instanceof Error ? err.message : String(err)}`);
         }
     };
 
@@ -852,6 +867,18 @@ export default function AgentExecutionPage() {
                                             title={`在 ${group.label} 中新建执行`}
                                         >
                                             <Plus className="h-3.5 w-3.5"/>
+                                        </button>
+                                    )}
+                                    {group.path && savedWorkspaces.some(ws => ws.path === group.path) && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleRemoveWorkspace(group.path!);
+                                            }}
+                                            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-destructive/10 hover:text-destructive transition-all shrink-0"
+                                            title={`移除工作区「${group.label}」（执行记录保留）`}
+                                        >
+                                            <FolderMinus className="h-3.5 w-3.5"/>
                                         </button>
                                     )}
                                 </div>
