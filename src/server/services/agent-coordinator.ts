@@ -783,9 +783,10 @@ export class AgentCoordinator {
     }
 
     /**
-     * 执行前准备 MCP 上下文：解析已启用 server → 显式等就绪（网关目录有 8s 软超时，
-     * 慢启动的 npx 上游会被静默跳过，agent 拿到空工具目录只能瞎猜）→ 组网关形态
-     * mcpServers。部分失败不阻塞执行（部分可用优于全部不可用），结论写执行日志。
+     * 执行前准备 MCP 上下文（对齐 T3 Code 模式）：全部启用的 server 统一挂载，
+     * 工具清单完整给到模型，**用不用由模型自主判断**（prompt hint 只做告知不做指派）。
+     * 显式等就绪（网关目录有 8s 软超时，慢启动的 npx 上游会被静默跳过）后
+     * 组网关形态 mcpServers；部分失败不阻塞执行，失败项单独告警。
      */
     private async prepareMcpContext(executionId: string): Promise<{map?: McpServerMap; hint?: string}> {
         const mcpService = this.config.mcpService;
@@ -801,10 +802,13 @@ export class AgentCoordinator {
         };
         try {
             const readiness = this.config.ensureMcpReady ? await this.config.ensureMcpReady(names) : [];
-            for (const r of readiness) {
-                await logLine(r.ok
-                    ? `🔌 MCP「${r.name}」已就绪（${r.toolCount ?? '?'} 个工具）`
-                    : `⚠️ MCP「${r.name}」连接失败：${r.reason ?? '未知原因'}（本轮不可用）`);
+            // 就绪结论压缩为一行（多 server 时不刷屏）；失败项单独一行带原因
+            const okServers = readiness.filter(r => r.ok);
+            if (okServers.length > 0) {
+                await logLine(`🔌 MCP 已就绪：${okServers.map(r => `${r.name}(${r.toolCount ?? '?'})`).join('、')}`);
+            }
+            for (const f of readiness.filter(r => !r.ok)) {
+                await logLine(`⚠️ MCP「${f.name}」连接失败：${f.reason ?? '未知原因'}（本轮不可用）`);
             }
             if (readiness.length > 0 && readiness.every(r => !r.ok)) {
                 await logLine('⚠️ 所有 MCP server 均未就绪，本轮执行没有 MCP 工具可用（请到「MCP 设置」检查连接）');

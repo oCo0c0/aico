@@ -302,7 +302,7 @@ describe('AgentCoordinator MCP 上下文（prepareMcpContext）', () => {
         expect(ctx.map).toBeTruthy();
         expect(Object.keys(ctx.map!)).toEqual(['ones-api']); // 禁用的 server 不进 map
         expect(ctx.hint).toContain('ones-api（7 个工具）');
-        expect(added.some(a => a.line.includes('🔌 MCP「ones-api」已就绪（7 个工具）'))).toBe(true);
+        expect(added.some(a => a.line.includes('🔌 MCP 已就绪：ones-api(7)'))).toBe(true);
     });
 
     it('全部上游失败：返回空上下文并写明确日志', async () => {

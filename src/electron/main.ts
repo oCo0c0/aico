@@ -434,6 +434,12 @@ if (!gotLock) {
             setupUpdater({
                 getWindow: () => win,
                 beforeInstall: () => {
+                    // 必须先于 taskkill 置位：spawnServer 的 exit 监听以 quitting 区分
+                    // 「主动退出」与「异常退出」，taskkill 后服务端 exit 事件可能在
+                    // before-quit（quitAndInstall 经 setImmediate 调 app.quit）之前先到
+                    // 事件循环——不置位会弹「后端服务进程异常退出」同步模态框，阻塞整个
+                    // 退出流程（用户视角即「点了安装应用不退出」）。
+                    quitting = true;
                     // quitAndInstall 先拉起 NSIS 安装器再退出应用，而 will-quit 的优雅
                     // 关闭握手最长要 5 秒——安装器抢先检测到存活进程就弹「无法关闭」。
                     // 且服务端子进程与 pi RPC 孙进程都是 aico.exe（ELECTRON_RUN_AS_NODE），

@@ -91,7 +91,13 @@ export function setupUpdater(opts: {
         if (lastState?.status !== 'downloaded') return;
         // 安装前清场（杀服务端进程树，防 NSIS「无法关闭」弹窗），退出并安装、装完自启
         opts.beforeInstall?.();
-        autoUpdater.quitAndInstall(false, true);
+        // 必须静默（isSilent=true）：electron-builder 的辅助式安装器（nsis.oneClick:false）
+        // 的「安装选项」页（per-user/per-machine 选择）在更新模式（--updated）下不会自动
+        // 跳过（templates/nsis/assistedInstaller.nsh 中唯一没有 skipPageIfUpdated 的页面），
+        // 非静默会弹出向导卡在该页等用户手点「下一步」，更新永远完不成。静默安装直接跑
+        // install section；且模板 installSection.nsh 末尾仅 `isForceRun && Silent` 才自动
+        // 重启应用 —— 非静默即使装完也不会自启。2026-11-26 实机复现确认。
+        autoUpdater.quitAndInstall(true, true);
     });
 
     // 启动延迟首查 + 定时轮询（定时器与主进程同寿，无需清理）
