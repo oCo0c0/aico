@@ -37,8 +37,8 @@ export interface PendingAttachment {
 interface ChatInputBoxProps {
     value: string;
     onChange: (v: string) => void;
-    /** 发送（Enter 或点击发送按钮）。返回 Promise，resolve 后组件清空附件 chips */
-    onSend: (text: string, attachments: PendingAttachment[]) => void | Promise<void>;
+    /** 发送（Enter 或点击发送按钮）。返回 false 或 reject 表示发送失败，组件恢复附件 chips（文本清空仍由页面负责） */
+    onSend: (text: string, attachments: PendingAttachment[]) => boolean | void | Promise<boolean | void>;
     disabled?: boolean;
     placeholder?: string;
     rows?: number;
@@ -193,12 +193,14 @@ export const ChatInputBox = React.forwardRef<HTMLTextAreaElement, ChatInputBoxPr
     const submit = async () => {
         if (!canSend) return;
         const atts = attachments;
-        setAttachments([]); // 乐观清空，失败由页面自行提示
+        setAttachments([]); // 乐观清空；onSend 返回 false（发送失败）时恢复
         try {
-            await onSend(value, atts);
+            const ok = await onSend(value, atts);
+            if (ok === false) setAttachments(atts);
         } catch (err) {
             // 错误提示由页面在 onSend 内负责；这里兜底避免未处理的 Promise 拒绝
             console.error('ChatInputBox: onSend failed', err);
+            setAttachments(atts);
         }
     };
     // 注意：props.onChange('') 由页面在 onSend 内完成（保持页面现有清空逻辑）

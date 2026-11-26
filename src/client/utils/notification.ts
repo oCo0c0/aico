@@ -93,3 +93,11 @@ export function notifyTaskResult(status: string, taskName?: string): void {
     if (!isElectron && showSystemNotification(title)) return;
     showToast(title, status);
 }
+
+/**
+ * 应用内错误提示（右上角 toast，5s 自动消失）。
+ * 不受通知开关限制——操作失败的反馈必须可见，开关只管任务结果类通知。
+ */
+export function notifyError(message: string): void {
+    showToast(message, 'failed');
+}

@@ -273,3 +273,69 @@ describe('AgentCoordinator「立即处理」中断流（interrupt 非终态）',
         expect(broadcasts().some(m => m.type === 'agent-execution:complete')).toBe(true);
     });
 });
+
+describe('AgentCoordinator MCP 上下文（prepareMcpContext）', () => {
+    /** 构造带自定义 config 的 coordinator（store 复用 fake，addLog 记录到 added） */
+    function makeCoord(config: Record<string, unknown>) {
+        const coord = new AgentCoordinator(config as never);
+        const added: Array<{ id: string; line: string }> = [];
+        (coord as unknown as { store: unknown }).store = {
+            addLog: async (id: string, line: string) => {
+                added.push({id, line});
+            },
+        };
+        return {coord, added};
+    }
+
+    it('已启用 server：等就绪 → 组 map + hint，结论写日志', async () => {
+        const {coord, added} = makeCoord({
+            cliRunner: {getActiveEngineId: () => 'claude'},
+            mcpService: {
+                list: () => [{name: 'ones-api', enabled: true}, {name: 'off', enabled: false}],
+                get: (n: string) => ({command: 'x', args: []}),
+            },
+            ensureMcpReady: async () => [{name: 'ones-api', ok: true, toolCount: 7}],
+        });
+        const ctx = await (coord as unknown as {
+            prepareMcpContext: (id: string) => Promise<{ map?: Record<string, unknown>; hint?: string }>;
+        }).prepareMcpContext('e1');
+        expect(ctx.map).toBeTruthy();
+        expect(Object.keys(ctx.map!)).toEqual(['ones-api']); // 禁用的 server 不进 map
+        expect(ctx.hint).toContain('ones-api（7 个工具）');
+        expect(added.some(a => a.line.includes('🔌 MCP「ones-api」已就绪（7 个工具）'))).toBe(true);
+    });
+
+    it('全部上游失败：返回空上下文并写明确日志', async () => {
+        const {coord, added} = makeCoord({
+            cliRunner: {getActiveEngineId: () => 'claude'},
+            mcpService: {list: () => [{name: 'ones-api'}]},
+            ensureMcpReady: async () => [{name: 'ones-api', ok: false, reason: 'timeout'}],
+        });
+        const ctx = await (coord as unknown as {
+            prepareMcpContext: (id: string) => Promise<{ map?: unknown; hint?: string }>;
+        }).prepareMcpContext('e2');
+        expect(ctx.map).toBeUndefined();
+        expect(ctx.hint).toBeUndefined();
+        expect(added.some(a => a.line.includes('所有 MCP server 均未就绪'))).toBe(true);
+    });
+
+    it('codex 引擎不支持运行时 MCP：直接跳过', async () => {
+        const {coord, added} = makeCoord({
+            cliRunner: {getActiveEngineId: () => 'codex'},
+            mcpService: {list: () => [{name: 'ones-api'}]},
+        });
+        const ctx = await (coord as unknown as {
+            prepareMcpContext: (id: string) => Promise<{ map?: unknown; hint?: string }>;
+        }).prepareMcpContext('e3');
+        expect(ctx.map).toBeUndefined();
+        expect(added).toEqual([]);
+    });
+
+    it('未配置 mcpService：返回空上下文（旧行为不变）', async () => {
+        const {coord} = makeCoord({cliRunner: {getActiveEngineId: () => 'claude'}});
+        const ctx = await (coord as unknown as {
+            prepareMcpContext: (id: string) => Promise<{ map?: unknown; hint?: string }>;
+        }).prepareMcpContext('e4');
+        expect(ctx.map).toBeUndefined();
+    });
+});

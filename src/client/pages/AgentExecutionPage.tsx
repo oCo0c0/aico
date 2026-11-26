@@ -16,7 +16,7 @@ import {onWsEvent, type AgentExecutionUpdateEvent} from '../lib/ws-events';
 import {usePageActiveRef} from '../hooks/usePageActive';
 import {useTranslation} from 'react-i18next';
 import {apiGet, apiPost, apiPut, apiDelete, pickFolder} from '../api';
-import {notifyTaskResult} from '../utils/notification';
+import {notifyTaskResult, notifyError} from '../utils/notification';
 import {useAppStore} from '../stores/app-store';
 import {cn, formatRelativeTime} from '../lib/utils';
 import {
@@ -71,7 +71,17 @@ interface SavedRequirement {
     number?: string;
     title: string;
     description?: string;
+    /** 工作副本（编辑/解析合并写入）；存在时为用户实际看到的内容，执行应优先取用 */
+    workingDescription?: string;
 }
+
+/** 需求生效内容：工作副本优先，与需求页展示口径一致 */
+function effectiveRequirementText(req: SavedRequirement): string {
+    return req.workingDescription ?? req.description ?? '';
+}
+
+/** 回复消息长度上限（与服务端 /reply 的 400 校验保持一致） */
+const MAX_REPLY_CHARS = 10000;
 
 /** 已保存工作区（轻量） */
 interface SavedWorkspaceLite {
@@ -388,7 +398,7 @@ export default function AgentExecutionPage() {
         let requirementTitle = '';
 
         if (reqMode === 'saved' && selectedRequirement) {
-            requirementText = selectedRequirement.description || '';
+            requirementText = effectiveRequirementText(selectedRequirement);
             requirementId = selectedRequirement.id;
             requirementNumber = selectedRequirement.number || '';
             requirementTitle = selectedRequirement.title || '';
@@ -417,21 +427,25 @@ export default function AgentExecutionPage() {
         }
     };
 
-    /** 开始执行（canStart 时由输入框发送触发；允许空文案，附件一并带给 /start） */
-    const handleStart = async (text: string, attachmentIds: string[]) => {
-        if (!activeId) return;
+    /** 开始执行（canStart 时由输入框发送触发；允许空文案，附件一并带给 /start）。返回 false 表示失败 */
+    const handleStart = async (text: string, attachmentIds: string[]): Promise<boolean> => {
+        if (!activeId) return false;
         try {
             // 将输入框中的详细内容一并发送（用户可能输入了细节但未点「发送」）
             const message = text.trim() || undefined;
-            setReplyText('');
             await apiPost(`/agent-execution/${activeId}/start`, {
                 message,
                 attachmentIds: attachmentIds.length ? attachmentIds : undefined,
             });
+            // 发送成功才清空输入框——失败时保留内容，避免用户长文被静默丢掉
+            setReplyText('');
             loadDetail(activeId);
             loadHistory();
+            return true;
         } catch (err) {
             console.error('[AgentExec] 启动失败:', err);
+            notifyError(`启动失败：${err instanceof Error ? err.message : String(err)}`);
+            return false;
         }
     };
 
@@ -446,11 +460,15 @@ export default function AgentExecutionPage() {
         }
     };
 
-    /** 回复 / 排队：isRunning 时消息进服务端 pendingReplies；附件以 attachmentIds 旁路传递 */
-    const handleReplyWithAttachments = async (text: string, attachmentIds: string[]) => {
-        if (!activeId || !text.trim() || replying) return;
+    /** 回复 / 排队：isRunning 时消息进服务端 pendingReplies；附件以 attachmentIds 旁路传递。返回 false 表示失败 */
+    const handleReplyWithAttachments = async (text: string, attachmentIds: string[]): Promise<boolean> => {
+        if (!activeId || !text.trim() || replying) return false;
+        // 服务端 /reply 有 10000 字符上限（超长返回 400），发送前预检给出明确提示
+        if (text.length > MAX_REPLY_CHARS) {
+            notifyError(`消息过长（${text.length} 字符），上限 ${MAX_REPLY_CHARS} 字符，请精简或拆分发送`);
+            return false;
+        }
         setReplying(true);
-        setReplyText('');
         try {
             // queued=true 时消息进服务端 pendingReplies（不落日志，不上屏），
             // 队列条与消费时机均以 detail.pendingReplies 为准
@@ -458,9 +476,14 @@ export default function AgentExecutionPage() {
                 message: text.trim(),
                 attachmentIds: attachmentIds.length ? attachmentIds : undefined,
             });
+            // 发送成功才清空输入框——失败时保留内容，避免用户长文被静默丢掉
+            setReplyText('');
             loadDetail(activeId);
+            return true;
         } catch (err) {
             console.error('回复失败:', err);
+            notifyError(`发送失败：${err instanceof Error ? err.message : String(err)}`);
+            return false;
         } finally {
             setReplying(false);
         }
@@ -759,7 +782,7 @@ export default function AgentExecutionPage() {
             {/* ====== 左侧面板：执行历史列表（宽度可拖拽，默认更窄） ====== */}
             <div
                 className={cn(
-                    'relative flex flex-col border-r border-border bg-muted/10 shrink-0',
+                    'relative flex flex-col border-r border-border/50 glass-sidebar shrink-0',
                     !draggingList && 'transition-[width] duration-200 ease-out',
                 )}
                 style={{width: listWidth}}
@@ -1102,15 +1125,15 @@ export default function AgentExecutionPage() {
                                                 if (outcome.handled) {
                                                     // 结果已由服务端写入日志流；刷新一次详情同步状态
                                                     if (activeId) await loadDetail(activeId);
-                                                    return;
+                                                    return true;
                                                 }
                                                 // 技能/自定义命令：用展开后的模板替代原文发给模型
                                                 text = outcome.sendText ?? text;
                                             }
                                             if (canStart) {
-                                                await handleStart(text, attachmentIds);
+                                                return await handleStart(text, attachmentIds);
                                             } else {
-                                                await handleReplyWithAttachments(text.trim(), attachmentIds);
+                                                return await handleReplyWithAttachments(text.trim(), attachmentIds);
                                             }
                                         }}
                                         placeholder={

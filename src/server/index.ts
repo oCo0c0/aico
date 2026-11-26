@@ -303,6 +303,10 @@ export async function createServer(port: number): Promise<http.Server> {
         cliRunner: cliRunnerService,
         memoryService,
         attachments: attachmentStore,
+        // MCP：执行前解析已启用 server 并等就绪，注入网关形态 mcpServers（Claude 走
+        // /api/mcp，pi 走扩展 REST 面白名单）；结论写执行日志
+        mcpService: mcpRegistryService,
+        ensureMcpReady: (names) => getMcpGateway().ensureUpstreamsReady(names),
     }, workspaceService, mineruService));
     app.use('/api/model-providers', createModelProviderRoutes(modelProviderStore));
     app.use('/api/prompts', createPromptsRoutes(cliRunnerService));

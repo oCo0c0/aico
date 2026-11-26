@@ -668,7 +668,7 @@ export default function PlanPage() {
     return (
         <div className="flex h-full">
             {/* ─── 左侧面板：计划历史列表 ─── */}
-            <div className="w-64 flex flex-col border-r border-border bg-muted/10 shrink-0">
+            <div className="w-64 flex flex-col border-r border-border/50 glass-sidebar shrink-0">
                 {/* 列表头部：标题和加载指示器 */}
                 <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">

@@ -238,11 +238,17 @@ export function createRequirementsRoutes(
                 res.json({success: false, error: result.error ?? 'no markdown'});
                 return;
             }
-            const updated = requirementStore.setParsedAttachment(req.params.id, name, {
+            const record = {
                 markdown: result.markdown,
                 backend: backend ?? 'pipeline',
                 parsedAt: new Date().toISOString(),
-            });
+            };
+            requirementStore.setParsedAttachment(req.params.id, name, record);
+            // 解析成功即自动合并进文档工作副本（幂等原位替换，可经「还原工作副本」回退）——
+            // 消灭「解析了但忘点合并 → 执行/Agent 拿不到附件内容」的断链
+            const withParsed = requirementStore.get(req.params.id)!;
+            const merged = mergeParsedIntoDescription(withParsed.workingDescription ?? withParsed.description, {[name]: record});
+            const updated = requirementStore.setWorkingDescription(req.params.id, merged)!;
             res.json({success: true, markdown: result.markdown, requirement: updated});
         } catch (err) {
             res.status(500).json({code: 'PARSE_ERROR', message: getErrorMessage(err)});

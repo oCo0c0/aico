@@ -653,6 +653,28 @@ export default function RequirementsPage(): JSX.Element {
         }
     };
 
+    /** 状态中文标签：原始枚举 → 人话；unknown/空 返回空串（调用方隐藏徽章） */
+    const statusLabel = (s: string) => {
+        const lower = (s ?? '').toLowerCase();
+        if (lower === '' || lower === 'unknown') return '';
+        const map: Record<string, string> = {
+            'in_progress': '进行中',
+            'in progress': '进行中',
+            'done': '已完成',
+            'completed': '已完成',
+            'draft': '草稿',
+            'open': '待处理',
+        };
+        return map[lower] ?? s;
+    };
+
+    /** 优先级中文标签 */
+    const priorityLabel = (p: string) => {
+        const lower = (p ?? '').toLowerCase();
+        const map: Record<string, string> = {high: '高', medium: '中', low: '低'};
+        return map[lower] ?? p;
+    };
+
     return (
         <div className="flex h-full flex-col">
             {/* === 顶部区域：页面标题、需求获取和搜索 === */}
@@ -948,8 +970,8 @@ export default function RequirementsPage(): JSX.Element {
                                          className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-accent text-sm">
                                         <span
                                             className="flex-1 truncate">{r.number ? `${r.number} ` : ''}{r.title}</span>
-                                        <span
-                                            className={cn('text-xs px-1.5 py-0.5 rounded', statusColor(r.status))}>{r.status}</span>
+                                        {statusLabel(r.status) && <span
+                                            className={cn('text-xs px-1.5 py-0.5 rounded', statusColor(r.status))}>{statusLabel(r.status)}</span>}
                                         <Button
                                             variant="ghost"
                                             size="sm"
@@ -970,8 +992,8 @@ export default function RequirementsPage(): JSX.Element {
             {/* === 主内容区域：左右分栏布局 === */}
             <div className="flex flex-1 min-h-0">
                 {/* 左侧：已保存需求列表 */}
-                <div className="w-80 flex flex-col border-r border-border" data-tour="req-saved-list">
-                    <div className="px-4 py-2 border-b border-border bg-muted/20">
+                <div className="w-80 flex flex-col border-r border-border/50 glass-sidebar" data-tour="req-saved-list">
+                    <div className="px-4 py-2 border-b border-border/50">
                         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                             {t('requirements.savedLabel', {count: saved.length})}
                         </p>
@@ -1008,13 +1030,13 @@ export default function RequirementsPage(): JSX.Element {
                                 <div className="flex-1 min-w-0">
                                     <p className="text-sm font-medium truncate">{req.number ? `${req.number} ` : ''}{req.title}</p>
                                     <div className="mt-1 flex items-center gap-2">
-                    <span className={cn('text-xs px-1.5 py-0.5 rounded', statusColor(req.status))}>
-                      {req.status}
-                    </span>
-                                        <span
+                    {statusLabel(req.status) && <span className={cn('text-xs px-1.5 py-0.5 rounded', statusColor(req.status))}>
+                      {statusLabel(req.status)}
+                    </span>}
+                                        {priorityLabel(req.priority) && <span
                                             className={cn('text-xs px-1.5 py-0.5 rounded', priorityColor(req.priority))}>
-                      {req.priority}
-                    </span>
+                      {priorityLabel(req.priority)}
+                    </span>}
                                     </div>
                                     <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground/60">
                                         <Clock className="h-3 w-3"/>
@@ -1112,12 +1134,12 @@ export default function RequirementsPage(): JSX.Element {
 
                                 {/* 元信息标签 */}
                                 <div className="flex flex-wrap items-center gap-2">
-                                    <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium border', statusColor(selected.status))}>
-                                        {selected.status}
-                                    </span>
-                                    <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium border', priorityColor(selected.priority))}>
-                                        {selected.priority}
-                                    </span>
+                                    {statusLabel(selected.status) && <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium border', statusColor(selected.status))}>
+                                        {statusLabel(selected.status)}
+                                    </span>}
+                                    {priorityLabel(selected.priority) && <span className={cn('text-xs px-2.5 py-1 rounded-full font-medium border', priorityColor(selected.priority))}>
+                                        {priorityLabel(selected.priority)}
+                                    </span>}
                                     <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                         <User className="h-3.5 w-3.5"/>
                                         {selected.assignee || t('requirements.unassigned')}
@@ -1350,9 +1372,9 @@ export default function RequirementsPage(): JSX.Element {
                                                 {selected.relatedIssues.map(issue => (
                                                     <li key={issue.id} className="flex items-center gap-2 text-sm">
                                                         <Link2 className="h-3.5 w-3.5 text-muted-foreground"/>
-                                                        <span className={cn('text-xs px-2 py-0.5 rounded-md border', statusColor(issue.status))}>
-                                                            {issue.status}
-                                                        </span>
+                                                        {statusLabel(issue.status) && <span className={cn('text-xs px-2 py-0.5 rounded-md border', statusColor(issue.status))}>
+                                                            {statusLabel(issue.status)}
+                                                        </span>}
                                                         <span className="text-muted-foreground">{issue.title}</span>
                                                     </li>
                                                 ))}

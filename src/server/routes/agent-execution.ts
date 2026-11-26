@@ -12,9 +12,48 @@ import {WorkspaceService} from '../services/workspace-service.js';
 import type {MinerUService} from '../services/mineru-service.js';
 import {broadcast} from '../websocket.js';
 import {isPathWithinRoots} from '../middleware/validation.js';
+import {APP_DATA_DIR} from '../../shared/app-data-dir.js';
 
 /** 附加文档的单文件内容上限（字符），防止超大文档撑爆上下文 */
 const MAX_DOCUMENT_CHARS = 100_000;
+
+/**
+ * 需求图片本地化改写。
+ * 需求文档里的图片以相对 URL（`/api/requirements/images/{reqId}/{file}`）引用——前端同源能渲染，
+ * 但该文本原样发给 Agent 时模型既不知道服务地址也无会话，图片等于没给。
+ * 对齐 T3 Code 的「附件落盘 + 绝对路径」模式：把已落盘的图片改写为磁盘绝对路径，
+ * 引擎的 read 工具可直接查看图片。未落盘或路径非法的引用原样保留。
+ * @param text 需求文本（可能含相对图片 URL）
+ * @param requirementsRoot 需求根目录（默认 `~/.aico/requirements`，测试可注入临时目录）
+ */
+export function localizeRequirementImages(
+    text: string,
+    requirementsRoot: string = path.join(APP_DATA_DIR, 'requirements'),
+): {text: string; count: number} {
+    const root = path.resolve(requirementsRoot);
+    let count = 0;
+    const rewritten = text.replace(
+        /!\[([^\]]*)\]\(\/api\/requirements\/images\/([^/)\s]+)\/([^)\s]+)\)/g,
+        (match, alt: string, reqId: string, filename: string) => {
+            // 段净化：拒绝路径分隔符与 ..，防构造越界路径
+            if (reqId.includes('..') || filename.includes('..')) return match;
+            const abs = path.resolve(root, reqId, 'images', filename);
+            if (!isPathWithinRoots(abs, [root]) || !fs.existsSync(abs)) return match;
+            count++;
+            return `![${alt}](${abs.replace(/\\/g, '/')})`;
+        },
+    );
+    return {text: rewritten, count};
+}
+
+/**
+ * 剥掉附件解析合并用的幂等标记（`<!--adw-parse:...-->` HTML 注释）。
+ * 标记是工作副本的内部实现细节（幂等原位替换/删除剥块依赖它），存储层保留不动，
+ * 但发给模型的 prompt 里纯属噪音。块内的「【xx 解析结果】」标题与正文保留。
+ */
+export function stripParseMarkers(text: string): string {
+    return text.replace(/<!--\/?adw-parse:[^>]*-->/g, '');
+}
 
 /**
  * 解析附加文档并追加到需求文本。
@@ -117,9 +156,14 @@ export function createAgentExecutionRoutes(
                 mineruService,
             );
 
+            // 需求图片本地化：相对图片 URL 改写为磁盘绝对路径（模型可用 read 工具看图）
+            const {text: localizedText, count: localizedImages} = localizeRequirementImages(enrichedText);
+            // 剥掉附件解析合并标记（内部幂等实现细节，不给模型看）
+            const promptText = stripParseMarkers(localizedText);
+
             const execution = await store.create({
                 requirementId,
-                requirementText: enrichedText,
+                requirementText: promptText,
                 requirementNumber: req.body.requirementNumber,
                 requirementTitle: req.body.requirementTitle || requirementText.split('\n')[0].substring(0, 50),
                 workspacePath: workspacePath || '',
@@ -133,6 +177,13 @@ export function createAgentExecutionRoutes(
             }
             for (const skip of skipped) {
                 await store.addLog(execution.id, `⚠️ 文档跳过：${skip}`);
+            }
+
+            if (localizedImages > 0) {
+                await store.addLog(
+                    execution.id,
+                    `🖼️ 需求中的 ${localizedImages} 张图片已映射为本地文件路径，Agent 可直接读取查看`,
+                );
             }
 
             // 记录到工作区历史，便于下次快速选择（静默失败）

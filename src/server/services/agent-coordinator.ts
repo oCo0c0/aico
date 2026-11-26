@@ -26,6 +26,8 @@ import {formatAttachmentsBlock} from './attachment-store.js';
 import {isStepWorthyTool} from '../platform/tool-catalog.js';
 import {buildSkillInjections} from './skill-injection.js';
 import {buildTranscript} from '../utils/transcript.js';
+import {resolveMcpServerMap} from '../utils/skill-utils.js';
+import type {McpServerMap} from './cli-providers/types.js';
 
 export interface CoordinatorConfig {
     cliRunner: CLIRunnerService;
@@ -34,6 +36,14 @@ export interface CoordinatorConfig {
     memoryService?: MemoryService;
     /** 聊天附件暂存（可选）：路由 reply/start 时 bindPending，协调器组 prompt 时 takePending 一次性注入 */
     attachments?: AttachmentStore;
+    /**
+     * MCP 注册中心（可选）：提供已启用的 server 名单。传入后执行前会把已启用
+     * server 组成网关形态 mcpServers 注入引擎（Claude 经 /api/mcp HTTP 面，
+     * pi 经扩展 REST 面白名单），否则 Agent 执行完全看不到 MCP 工具。
+     */
+    mcpService?: { list?: () => Array<{ name: string; enabled?: boolean }> };
+    /** MCP 上游就绪等待（可选）：网关目录有 8s 软超时，慢启动上游会被静默跳过 */
+    ensureMcpReady?: (names: string[]) => Promise<Array<{ name: string; ok: boolean; toolCount?: number; reason?: string }>>;
 }
 
 // 写类/Shell/任务/定时类工具才创建独立步骤，Read/Glob/Grep 等读操作是噪声。
@@ -138,6 +148,8 @@ export class AgentCoordinator {
      * 日志重复（同一行写多次）、bridge 事件串线、工具行错配。
      */
     private runningExecutions = new Set<string>();
+    /** 本次 execute 生命周期内的 MCP 上下文（排队续跑各轮复用，结束清理） */
+    private mcpContexts = new Map<string, {map?: McpServerMap; hint?: string}>();
     /** 跨引擎/会话失效续接时注入的上下文摘要上限（字符） */
     private static readonly CONTINUITY_TRANSCRIPT_CHARS = 12_000;
     /** 单轮步数上限（引擎 maxTurns）的自动续跑批数上限：8 × 50 = 400 轮 */
@@ -161,6 +173,10 @@ export class AgentCoordinator {
         }
         this.runningExecutions.add(executionId);
         try {
+            // MCP 上下文整个 execute 生命周期只准备一次（排队续跑各轮复用，
+            // 避免每轮重复等待就绪与重复日志）
+            const mcp = await this.prepareMcpContext(executionId);
+            this.mcpContexts.set(executionId, mcp);
             while (true) {
                 this.queuedReplyFlags.delete(executionId);
                 // 消费排队消息：此刻才写入对话日志（上屏时机=消费时机，
@@ -224,6 +240,7 @@ export class AgentCoordinator {
             this.denyPendingPermissions(executionId, '执行已结束');
             this.queuedReplyFlags.delete(executionId);
             this.interruptFlags.delete(executionId);
+            this.mcpContexts.delete(executionId);
         }
     }
 
@@ -293,9 +310,11 @@ export class AgentCoordinator {
         }
 
         if (subTasks.length > 0) {
-            return this.runSubTaskLoop(executionId, execution, cwd, subTasks, controller, pendingDocs);
+            return this.runSubTaskLoop(executionId, execution, cwd, subTasks, controller, pendingDocs,
+                this.mcpContexts.get(executionId) ?? {});
         }
-        return this.runSingleShot(executionId, execution, cwd, controller, userReplies, pendingDocs);
+        return this.runSingleShot(executionId, execution, cwd, controller, userReplies, pendingDocs,
+            this.mcpContexts.get(executionId) ?? {});
     }
 
     /**
@@ -561,6 +580,7 @@ export class AgentCoordinator {
         subTasks: SubTask[],
         controller: AbortController,
         pendingDocs: StoredAttachment[] = [],
+        mcp: {map?: McpServerMap; hint?: string} = {},
     ): Promise<'completed' | 'failed' | 'aborted'> {
         // 会话归属判定（换引擎 / 会话失效 → 不传旧 id，改用此前对话摘要延续上下文）
         const session = await this.resolveSessionForRun(execution, cwd);
@@ -569,6 +589,7 @@ export class AgentCoordinator {
         let continuityInjected = false;
         let overall: 'completed' | 'failed' | 'aborted' = 'completed';
         let attachmentsInjected = false;
+        let mcpHintInjected = false;
 
         for (const sub of subTasks) {
             if (controller.signal.aborted) {
@@ -609,6 +630,11 @@ export class AgentCoordinator {
                 subPrompt += continuityBlock(session.transcript);
                 continuityInjected = true;
             }
+            // MCP 工具面 hint 只注入首个实际执行的子任务（同会话后续子任务上下文里已存在）
+            if (mcp.hint && !mcpHintInjected) {
+                subPrompt += mcp.hint;
+                mcpHintInjected = true;
+            }
 
             const result = await this.runBridgeWithTurnContinuation(
                 executionId,
@@ -617,6 +643,7 @@ export class AgentCoordinator {
                     cwd,
                     ...(lastSessionId ? {sessionId: lastSessionId} : {}),
                     maxTurns: 50,
+                    ...(mcp.map ? {mcpServers: mcp.map} : {}),
                 },
                 {
                     workspacePath: cwd,
@@ -756,6 +783,53 @@ export class AgentCoordinator {
     }
 
     /**
+     * 执行前准备 MCP 上下文：解析已启用 server → 显式等就绪（网关目录有 8s 软超时，
+     * 慢启动的 npx 上游会被静默跳过，agent 拿到空工具目录只能瞎猜）→ 组网关形态
+     * mcpServers。部分失败不阻塞执行（部分可用优于全部不可用），结论写执行日志。
+     */
+    private async prepareMcpContext(executionId: string): Promise<{map?: McpServerMap; hint?: string}> {
+        const mcpService = this.config.mcpService;
+        if (!mcpService) return {};
+        const names = (mcpService.list?.() ?? []).filter(s => s.enabled !== false).map(s => s.name);
+        if (names.length === 0) return {};
+        // codex 不支持运行时动态 MCP（capabilities.supportsRuntimeMcp=false）：跳过，省去就绪等待
+        if (this.config.cliRunner.getActiveEngineId() === 'codex') return {};
+
+        const logLine = async (line: string) => {
+            await this.store.addLog(executionId, line).catch(() => undefined);
+            this.broadcastLog(executionId, line);
+        };
+        try {
+            const readiness = this.config.ensureMcpReady ? await this.config.ensureMcpReady(names) : [];
+            for (const r of readiness) {
+                await logLine(r.ok
+                    ? `🔌 MCP「${r.name}」已就绪（${r.toolCount ?? '?'} 个工具）`
+                    : `⚠️ MCP「${r.name}」连接失败：${r.reason ?? '未知原因'}（本轮不可用）`);
+            }
+            if (readiness.length > 0 && readiness.every(r => !r.ok)) {
+                await logLine('⚠️ 所有 MCP server 均未就绪，本轮执行没有 MCP 工具可用（请到「MCP 设置」检查连接）');
+                return {};
+            }
+
+            const {map} = resolveMcpServerMap(names, mcpService as Parameters<typeof resolveMcpServerMap>[1]);
+            if (!map) return {};
+
+            // 模型侧 hint：明确告知已挂载的工具面，引导按需调用而不是猜/编
+            const rows = readiness.length > 0
+                ? readiness.filter(r => r.ok).map(r => ({name: r.name, count: r.toolCount}))
+                : names.map(name => ({name, count: undefined as number | undefined}));
+            const hint = '\n\n---\n\n## 可用 MCP 工具\n\n'
+                + '本会话已挂载以下 MCP server 的工具（工具名形如 `server__tool` 或 `mcp__adw-platform__server__tool`）。'
+                + '当任务涉及这些外部系统能力（查询/操作外部系统等）时，**优先使用这些工具**，不要凭记忆猜测或编造数据：\n'
+                + rows.map(r => `- ${r.name}（${r.count ?? '?'} 个工具）`).join('\n');
+            return {map, hint};
+        } catch (err) {
+            await logLine(`⚠️ MCP 准备失败（不影响执行，仅本轮无 MCP 工具）：${getErrorMessage(err)}`);
+            return {};
+        }
+    }
+
+    /**
      * 调一次引擎；若因**单轮步数上限**（引擎 maxTurns）停止，则带着同一会话自动续跑下一批。
      *
      * 背景：Claude 侧 `maxTurns` 打满时 SDK 返回 `error_max_turns`，此前被当成硬失败
@@ -804,6 +878,7 @@ export class AgentCoordinator {
         controller: AbortController,
         userReplies: string[],
         pendingDocs: StoredAttachment[] = [],
+        mcp: {map?: McpServerMap; hint?: string} = {},
     ): Promise<'completed' | 'failed' | 'aborted'> {
         if (pendingDocs.length > 0) {
             const block = formatAttachmentsBlock(pendingDocs);
@@ -832,6 +907,8 @@ export class AgentCoordinator {
         }
         // 会话无法续接（换引擎/会话失效）：把此前对话摘要带进本轮，避免上下文完全丢失
         if (session.transcript) prompt += continuityBlock(session.transcript);
+        // MCP 工具面 hint：告知已挂载的 server 与按需调用取向
+        if (mcp.hint) prompt += mcp.hint;
 
         const result = await this.runBridgeWithTurnContinuation(
             executionId,
@@ -840,6 +917,7 @@ export class AgentCoordinator {
                 cwd,
                 ...(session.sessionId ? {sessionId: session.sessionId} : {}),
                 maxTurns: 50,
+                ...(mcp.map ? {mcpServers: mcp.map} : {}),
             },
             {
                 workspacePath: cwd,
