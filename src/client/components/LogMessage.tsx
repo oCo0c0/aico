@@ -144,7 +144,7 @@ export const LogMessage = memo(function LogMessage({message}: LogMessageProps) {
     return (
         <div className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
             <div className={cn(
-                'group relative rounded-xl border px-3.5 py-2.5 w-full shadow-sm',
+                'group relative rounded-xl border px-3.5 py-2.5 w-full min-w-0 shadow-sm',
                 'animate-in fade-in slide-in-from-bottom-1 duration-200',
                 meta.bubble
             )}>

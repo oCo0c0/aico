@@ -555,6 +555,14 @@ body.pet-window #root {
 }
 
 /* === Markdown Content Styles (Apple 风格) === */
+
+/* 长词兜底换行：执行日志里用户粘贴的超长无空格内容（长 URL / 长英文串 / 代码凭证等）
+   否则会溢出气泡，且作为 flex 子项（min-width:auto）会把日志窗口横向撑破。
+   anywhere（而非 break-word）参与 min-content 计算，flex 气泡也能正确收缩折行 */
+.markdown-body {
+    overflow-wrap: anywhere;
+}
+
 .markdown-body > *:first-child {
     margin-top: 0 !important;
 }
